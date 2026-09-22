@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------- your data
+# storage/ is your library (PDFs, extracted text, highlights, chat). It is
+# synced between machines by OneDrive, NOT by git — see the README. Letting
+# both sync the same files would have them fighting over every change, and the
+# PDFs alone would bloat the repo permanently (~10MB each, and git history
+# never forgets a blob you later delete).
+storage/
+
+# The derived SQLite cache. Rebuilt from storage/ on every startup — never
+# sync it, never commit it. (It lives outside storage/ for exactly this reason.)
+cache/
+
+# ------------------------------------------------------------------ secrets
+# GEMINI_API_KEY lives here. .env.example is committed instead.
+.env
+
+# ------------------------------------------------------------ local clutter
+.venv/
+__pycache__/
+*.pyc
+server.out.log
+server.err.log
+
+# Scratch notes written by subagents; local to this machine.
+.claude/agent-memory/

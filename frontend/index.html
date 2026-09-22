@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Research Paper Manager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=20" />
+  <!-- PDF.js from CDN (no build step; needs internet on first load) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- KaTeX for rendering LaTeX math in AI answers (CDN; falls back to raw text if offline) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- Thin icon rail -->
+    <nav class="icon-rail">
+      <div class="rail-logo" title="Research Paper Manager">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5c0-1 .8-1.5 1.8-1.2C7.6 4.8 9.4 5.6 12 7c2.6-1.4 4.4-2.2 6.2-2.7 1-.3 1.8.2 1.8 1.2v12c0 1-.8 1.5-1.8 1.2-1.8-.5-3.6-1.3-6.2-2.7-2.6 1.4-4.4 2.2-6.2 2.7C4.8 19 4 18.5 4 17.5v-12Z"/><path d="M12 7v11"/></svg>
+      </div>
+
+      <div class="rail-nav">
+        <button class="rail-btn active" type="button" title="Library">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
+        </button>
+        <button class="rail-btn" type="button" title="Folders">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.7c0-.9.7-1.6 1.6-1.6h4l1.7 2h7.1c.9 0 1.6.7 1.6 1.6v8.6c0 .9-.7 1.6-1.6 1.6H5.1c-.9 0-1.6-.7-1.6-1.6V6.7Z"/></svg>
+        </button>
+        <button id="railReaderBtn" class="rail-btn" type="button" title="Full-screen read">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2c-1.8-1-4-1.4-6.2-1V18c2.2-.4 4.4 0 6.2 1 1.8-1 4-1.4 6.2-1V5.2c-2.2-.4-4.4 0-6.2 1Z"/><path d="M12 6.2V19.2"/></svg>
+        </button>
+        <button id="railHighlightsBtn" class="rail-btn" type="button" title="Highlights">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-4-6.5 4V5.5a1 1 0 0 1 1-1Z"/></svg>
+        </button>
+      </div>
+
+      <div class="rail-bottom">
+        <button id="railSettingsBtn" class="rail-btn" type="button" title="AI status">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3.5v2M12 18.5v2M20.5 12h-2M5.5 12h-2M17.7 6.3l-1.4 1.4M7.7 16.3l-1.4 1.4M17.7 17.7l-1.4-1.4M7.7 7.7 6.3 6.3"/></svg>
+        </button>
+      </div>
+    </nav>
+
+    <!-- Sidebar: the searchable library -->
+    <aside id="sidebar">
+      <div class="library-card">
+        <div class="library-card-head">
+          <h1 class="library-title">Library</h1>
+          <label class="icon-btn upload-btn" title="Upload PDF">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            <input type="file" id="uploadInput" accept="application/pdf" hidden />
+          </label>
+        </div>
+
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4-4"/></svg>
+          <input type="text" id="librarySearch" placeholder="Search library…" />
+        </div>
+
+        <div class="lib-tabs">
+          <button class="lib-tab active" type="button" data-libtab="all">All</button>
+          <button class="lib-tab" type="button" data-libtab="recent">Recent</button>
+        </div>
+
+        <button id="libraryChatBtn" class="library-chat-btn" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v10H9l-4 3.5v-3.5H4v-10Z"/></svg>
+          <span>Chat across all papers</span>
+        </button>
+
+        <div class="library-head">
+          <span class="lib-label">Papers</span>
+          <button id="newFolderBtn" class="new-folder-btn" type="button" title="Create a folder">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.7c0-.7.6-1.3 1.3-1.3h3.3l1.4 1.6h5.7c.7 0 1.3.6 1.3 1.3v6.7c0 .7-.6 1.3-1.3 1.3h-10.4c-.7 0-1.3-.6-1.3-1.3V5.7Z"/><path d="M10 9v4M8 11h4"/></svg>
+            Folder
+          </button>
+        </div>
+
+        <ul id="paperList"></ul>
+
+        <div id="aiStatus" class="ai-status"></div>
+      </div>
+    </aside>
+
+    <!-- Center: PDF viewer -->
+    <main id="viewer">
+      <div id="viewerHeader">
+        <span id="viewerTitle">Select or upload a paper to begin</span>
+        <div class="viewer-actions">
+          <button id="summarizeBtn" class="primary" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c.5 3 2 4.5 5 5-3 .5-4.5 2-5 5-.5-3-2-4.5-5-5 3-.5 4.5-2 5-5Z"/><path d="M18.5 15c.25 1.3.9 2 2 2.2-1.1.2-1.75.9-2 2.2-.25-1.3-.9-2-2-2.2 1.1-.2 1.75-.9 2-2.2Z"/></svg>
+            <span>Summarize</span>
+          </button>
+          <button id="prereadingBtn" class="icon-label-btn" title="AI: concepts to understand before reading this paper" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2c-1.8-1-4-1.4-6.2-1V18c2.2-.4 4.4 0 6.2 1 1.8-1 4-1.4 6.2-1V5.2c-2.2-.4-4.4 0-6.2 1Z"/><path d="M12 6.2V19.2"/></svg>
+            <span>Prereading</span>
+          </button>
+          <button id="fullscreenBtn" class="icon-btn-round" title="Read full screen" disabled>
+            <svg class="icon-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/></svg>
+            <svg class="icon-compress" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h5V4M20 9h-5V4M4 15h5v5M20 15h-5v5"/></svg>
+          </button>
+          <button id="deletePaperBtn" class="icon-btn-round danger" title="Delete paper" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.2c0-.6.5-1.1 1.1-1.1h2.8c.6 0 1.1.5 1.1 1.1V7M7 7l.7 12c.05.9.8 1.6 1.7 1.6h5.2c.9 0 1.65-.7 1.7-1.6L17 7"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="pdfContainer">
+        <div id="emptyState">
+          <div class="empty-icon">
+            <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h13l6 6v22a2 2 0 0 1-2 2H11a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/><path d="M24 5v6h6"/><path d="M14 21h12M14 26h12M14 16h6"/></svg>
+          </div>
+          <p class="empty-title">Upload a paper to get started</p>
+          <p class="muted">Read it here, select text to highlight or ask the AI,<br />and chat across your whole library.</p>
+          <p class="muted zoom-hint">Tip: Ctrl + scroll to zoom the page.</p>
+        </div>
+      </div>
+
+      <!-- Floating zoom controls over the PDF canvas -->
+      <div class="zoom-float">
+        <button id="zoomIn" class="icon-btn-round" title="Zoom in (or Ctrl + scroll)" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button id="zoomOut" class="icon-btn-round" title="Zoom out" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 12h14"/></svg>
+        </button>
+      </div>
+
+      <!-- Full-screen reading mode: floating chat + selection toolbar live
+           inside #viewer so they remain visible when the viewer is fullscreen -->
+      <button id="fsChatToggle" class="fs-chat-toggle hidden" title="Chat with AI">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v10H9l-4 3.5v-3.5H4v-10Z"/></svg>
+        <span>Ask AI</span>
+      </button>
+      <div id="fsChatPopup" class="fs-chat-popup hidden">
+        <div class="fs-resize n"></div><div class="fs-resize s"></div>
+        <div class="fs-resize e"></div><div class="fs-resize w"></div>
+        <div class="fs-resize ne"></div><div class="fs-resize nw"></div>
+        <div class="fs-resize se"></div><div class="fs-resize sw"></div>
+        <div class="fs-chat-head">
+          <span class="fs-grip" aria-hidden="true">
+            <svg viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="1.1"/><circle cx="8" cy="4" r="1.1"/><circle cx="12" cy="4" r="1.1"/><circle cx="4" cy="8" r="1.1"/><circle cx="8" cy="8" r="1.1"/><circle cx="12" cy="8" r="1.1"/><circle cx="4" cy="12" r="1.1"/><circle cx="8" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/></svg>
+          </span>
+          <span>Ask about this paper</span>
+          <button id="fsChatClose" title="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+        <div id="fsChatBody"></div>
+        <div id="fsInputResize" class="fs-input-resize" title="Drag to resize the input"></div>
+        <div class="fs-chat-input-row">
+          <textarea id="fsChatInput" placeholder="Ask a question…" rows="1"></textarea>
+          <button id="fsChatSend" title="Send">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4 10.5 13.5M20 4l-6.5 16-3-6.5L4 10.5 20 4Z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Floating toolbar shown when text is selected in the PDF -->
+      <div id="selectionToolbar" class="selection-toolbar hidden">
+        <button data-action="highlight">Highlight</button>
+        <button data-action="summarize">Summarize</button>
+        <button data-action="ask">Ask AI</button>
+      </div>
+    </main>
+
+    <!-- Right: chat + highlights -->
+    <section id="panel">
+      <div class="panel-tabs">
+        <button class="tab active" data-tab="chat">Chat</button>
+        <button class="tab" data-tab="highlights">Highlights</button>
+      </div>
+
+      <div id="tab-chat" class="tab-content active">
+        <div id="chatTitle" class="chat-title">Document chat</div>
+        <div id="chatMessages"></div>
+        <div class="chat-input-row">
+          <textarea id="chatInput" placeholder="Ask a question…" rows="2"></textarea>
+          <button id="sendBtn" title="Send">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4 10.5 13.5M20 4l-6.5 16-3-6.5L4 10.5 20 4Z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="tab-highlights" class="tab-content">
+        <div id="highlightList"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js?v=20"></script>
+</body>
+</html>

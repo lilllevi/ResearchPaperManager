@@ -1,0 +1,10 @@
+# Normalize to LF in the repository, check out native per platform, so the two
+# machines don't produce whole-file diffs just from line endings.
+* text=auto
+
+# PowerShell is happiest with CRLF on Windows.
+*.ps1 text eol=crlf
+
+# Binary — never touch, never try to diff.
+*.png binary
+*.pdf binary

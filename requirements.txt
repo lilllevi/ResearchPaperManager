@@ -1,0 +1,9 @@
+# Minimum versions; pip picks the newest wheels compatible with your Python.
+# All of these ship pure-Python or prebuilt wheels — no C/C++ build tools needed.
+# (The Gemini AI calls use the REST API via Python's stdlib, so no AI SDK here.)
+fastapi>=0.115
+uvicorn>=0.34
+python-multipart>=0.0.20
+pypdf>=5.1
+rank-bm25>=0.2.2
+python-dotenv>=1.0

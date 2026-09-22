@@ -1,0 +1,447 @@
+"""FastAPI application: serves the frontend and the JSON API.
+
+Run from the project root with run.ps1, or directly:
+    uvicorn backend.main:app --host 127.0.0.1 --port 8000
+"""
+
+import json
+import sys
+from pathlib import Path
+
+# Make the sibling modules (db, rag, ai, pdf_utils) importable whether the app
+# is launched as "backend.main:app" from the project root or run directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from dotenv import load_dotenv
+
+# Load .env from the project root before anything reads os.environ.
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+import db
+import rag
+import ai
+import pdf_utils
+import store
+
+FRONTEND_DIR = BASE_DIR / "frontend"
+
+
+def _sync_from_disk():
+    """Reconcile the cache with the sidecar files, then refresh the index."""
+    with db.suspended_flush():
+        result = store.bootstrap()
+    rag.index.rebuild()
+    return result
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init_db()
+    db.backfill_uids()
+    # storage/ is the source of truth; the DB in cache/ is rebuilt from it.
+    result = _sync_from_disk()
+    print(
+        f"[store] {result['mode']}: {result['papers']} papers, "
+        f"{result['folders']} folders"
+        + (f", {result['imported']} updated" if result.get("imported") else "")
+        + (f", {result['removed']} removed" if result.get("removed") else "")
+    )
+    for name in result.get("skipped") or []:
+        print(f"[store] ignored unrecognized sidecar (sync conflict copy?): {name}")
+    yield
+
+
+app = FastAPI(title="Research Paper Manager", lifespan=lifespan)
+
+
+# --------------------------------------------------------------- API models
+
+class ChatRequest(BaseModel):
+    question: str
+    selection: str | None = None
+
+
+class HighlightRequest(BaseModel):
+    page: int
+    text: str
+    rects: list = []
+    color: str = "#ffd54a"
+    note: str = ""
+
+
+class PaperUpdate(BaseModel):
+    # Both optional; we use model_fields_set to tell "omitted" from "set to null".
+    title: str | None = None
+    folder_id: int | None = None
+
+
+class FolderCreate(BaseModel):
+    name: str
+    parent_id: int | None = None
+
+
+class FolderUpdate(BaseModel):
+    # Both optional; model_fields_set distinguishes "omitted" from "set to null"
+    # (setting parent_id to null moves the folder to the top level).
+    name: str | None = None
+    parent_id: int | None = None
+
+
+# ------------------------------------------------------------------ status
+
+@app.get("/api/status")
+def status():
+    return {"ai_enabled": ai.has_api_key(), "model": ai.MODEL}
+
+
+@app.post("/api/sync/reload")
+def sync_reload():
+    """Re-read the sidecar files into the cache.
+
+    Startup does this automatically; this endpoint exists for when a sync
+    client drops in another machine's changes while the app is already open, so
+    you can pick them up without restarting."""
+    return _sync_from_disk()
+
+
+@app.post("/api/sync/export")
+def sync_export():
+    """Rewrite every sidecar from the cache — a repair for files lost or
+    damaged while the database is still intact."""
+    with db.suspended_flush():
+        db.backfill_uids()
+        result = store.export_all()
+    return result
+
+
+# ------------------------------------------------------------------ papers
+
+@app.get("/api/papers")
+def get_papers():
+    return db.list_papers()
+
+
+@app.post("/api/papers")
+async def upload_paper(file: UploadFile = File(...), title: str = Form(None)):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are supported.")
+
+    # The uid is this paper's stable identity everywhere: the PDF filename, the
+    # text and JSON sidecars, and the row in the cache all key off it.
+    uid = store.new_uid()
+    stored_name = f"{uid}.pdf"
+    dest = db.UPLOADS_DIR / stored_name
+    data = await file.read()
+    dest.write_bytes(data)
+
+    try:
+        pages, num_pages = pdf_utils.extract_pages(dest)
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, f"Could not read PDF: {e}")
+
+    full_text = "\n".join(pages)
+    # Prefer an explicit title; otherwise let the AI read the title off the
+    # paper's opening text; fall back to the filename if that's unavailable.
+    paper_title = (title or "").strip()
+    if not paper_title and ai.has_api_key():
+        try:
+            paper_title = ai.detect_title(full_text)
+        except Exception:
+            paper_title = ""
+    if not paper_title:
+        paper_title = file.filename.rsplit(".", 1)[0]
+
+    paper_id = db.insert_paper(
+        paper_title, file.filename, stored_name, num_pages, full_text, uid
+    )
+    chunks = pdf_utils.chunk_pages(pages)
+    if chunks:
+        db.insert_chunks(paper_id, chunks)
+    # Page text goes to its own immutable sidecar so other machines can rebuild
+    # the index without re-parsing the PDF.
+    store.write_text(uid, pages)
+    store.write_paper(paper_id)
+    rag.index.rebuild()
+
+    return {"id": paper_id, "title": paper_title, "num_pages": num_pages}
+
+
+@app.get("/api/papers/{paper_id}")
+def paper_meta(paper_id: int):
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    return {
+        "id": paper["id"],
+        "title": paper["title"],
+        "filename": paper["filename"],
+        "num_pages": paper["num_pages"],
+        "uploaded_at": paper["uploaded_at"],
+    }
+
+
+@app.patch("/api/papers/{paper_id}")
+def update_paper(paper_id: int, req: PaperUpdate):
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    fields = req.model_fields_set
+    if "title" in fields:
+        new_title = (req.title or "").strip()
+        if not new_title:
+            raise HTTPException(400, "Title cannot be empty.")
+        db.rename_paper(paper_id, new_title)
+        # Titles appear in cross-corpus source citations, so refresh the index.
+        rag.index.rebuild()
+    if "folder_id" in fields:
+        if req.folder_id is not None and not db.get_folder(req.folder_id):
+            raise HTTPException(404, "Folder not found.")
+        db.set_paper_folder(paper_id, req.folder_id)
+    return {"ok": True}
+
+
+@app.get("/api/papers/{paper_id}/file")
+def paper_file(paper_id: int):
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    path = db.UPLOADS_DIR / paper["stored_name"]
+    if not path.exists():
+        raise HTTPException(404, "PDF file missing on disk.")
+    return FileResponse(path, media_type="application/pdf", filename=paper["filename"])
+
+
+@app.delete("/api/papers/{paper_id}")
+def remove_paper(paper_id: int):
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    # Remove the PDF and its sidecars, then the DB rows (cascades to chunks).
+    # Deleting the sidecar is what propagates this delete to other machines.
+    if paper.get("uid"):
+        store.delete_paper_files(paper["uid"])
+    else:
+        (db.UPLOADS_DIR / paper["stored_name"]).unlink(missing_ok=True)
+    db.delete_paper(paper_id)
+    rag.index.rebuild()
+    return {"ok": True}
+
+
+# -------------------------------------------------------------- summaries
+
+@app.post("/api/papers/{paper_id}/summarize")
+def summarize(paper_id: int):
+    _require_ai()
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    summary = ai.summarize_document(paper["title"], paper["full_text"])
+    # Persist the summary into the document chat so it survives restarts.
+    db.add_message("doc", paper_id, "user", "Summarize this paper.")
+    db.add_message("doc", paper_id, "assistant", summary)
+    return {"summary": summary}
+
+
+@app.post("/api/papers/{paper_id}/prereading")
+def prereading(paper_id: int):
+    _require_ai()
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    guide = ai.generate_prereading(paper["title"], paper["full_text"])
+    # Persist into the document chat so it survives restarts, like summaries.
+    db.add_message("doc", paper_id, "user", "Generate a prereading guide.")
+    db.add_message("doc", paper_id, "assistant", guide)
+    return {"prereading": guide}
+
+
+@app.post("/api/papers/{paper_id}/summarize-selection")
+def summarize_selection(paper_id: int, req: ChatRequest):
+    _require_ai()
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    passage = (req.selection or req.question or "").strip()
+    if not passage:
+        raise HTTPException(400, "No passage provided.")
+    summary = ai.summarize_passage(paper["title"], passage)
+    db.add_message("doc", paper_id, "user", f"Summarize this passage:\n\n{passage}")
+    db.add_message("doc", paper_id, "assistant", summary)
+    return {"summary": summary}
+
+
+# ------------------------------------------------------------ document chat
+
+@app.get("/api/papers/{paper_id}/chat")
+def doc_chat_history(paper_id: int):
+    return db.get_messages("doc", paper_id)
+
+
+@app.post("/api/papers/{paper_id}/chat")
+def doc_chat(paper_id: int, req: ChatRequest):
+    _require_ai()
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(400, "Empty question.")
+
+    history = db.get_messages("doc", paper_id)
+    # Retrieve context from this paper. If a passage is selected, bias the
+    # search toward it by appending it to the query.
+    search_query = question if not req.selection else f"{question}\n{req.selection}"
+    hits = rag.index.search(search_query, top_k=6, paper_id=paper_id)
+
+    answer = ai.answer_about_document(
+        paper["title"], question, hits, history, selection=req.selection
+    )
+
+    user_content = question
+    if req.selection:
+        user_content = f"[Re: highlighted passage]\n{question}"
+    db.add_message("doc", paper_id, "user", user_content)
+    db.add_message("doc", paper_id, "assistant", answer)
+    return {"answer": answer, "sources": [{"page": h["page"]} for h in hits]}
+
+
+# --------------------------------------------------------------- highlights
+
+@app.get("/api/papers/{paper_id}/highlights")
+def get_highlights(paper_id: int):
+    rows = db.list_highlights(paper_id)
+    for r in rows:
+        r["rects"] = json.loads(r["rects_json"])
+        del r["rects_json"]
+    return rows
+
+
+@app.post("/api/papers/{paper_id}/highlights")
+def create_highlight(paper_id: int, req: HighlightRequest):
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    hid = db.add_highlight(
+        paper_id, req.page, req.text, json.dumps(req.rects), req.color, req.note
+    )
+    return {"id": hid}
+
+
+@app.delete("/api/highlights/{highlight_id}")
+def remove_highlight(highlight_id: int):
+    db.delete_highlight(highlight_id)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------- library chat
+
+@app.get("/api/library/chat")
+def library_chat_history():
+    return db.get_messages("library")
+
+
+@app.post("/api/library/chat")
+def library_chat(req: ChatRequest):
+    _require_ai()
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(400, "Empty question.")
+
+    history = db.get_messages("library")
+    hits = rag.index.search(question, top_k=8)
+    answer = ai.answer_across_corpus(question, hits, history)
+
+    db.add_message("library", None, "user", question)
+    db.add_message("library", None, "assistant", answer)
+    sources = [{"paper_id": h["paper_id"], "title": h["title"], "page": h["page"]} for h in hits]
+    return {"answer": answer, "sources": sources}
+
+
+# ----------------------------------------------------------------- folders
+
+@app.get("/api/folders")
+def get_folders():
+    return db.list_folders()
+
+
+@app.post("/api/folders")
+def create_folder(req: FolderCreate):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name cannot be empty.")
+    if req.parent_id is not None and not db.get_folder(req.parent_id):
+        raise HTTPException(404, "Parent folder not found.")
+    fid = db.create_folder(name, req.parent_id)
+    return {"id": fid, "name": name, "parent_id": req.parent_id}
+
+
+@app.patch("/api/folders/{folder_id}")
+def update_folder(folder_id: int, req: FolderUpdate):
+    if not db.get_folder(folder_id):
+        raise HTTPException(404, "Folder not found.")
+    fields = req.model_fields_set
+    if "name" in fields:
+        name = (req.name or "").strip()
+        if not name:
+            raise HTTPException(400, "Folder name cannot be empty.")
+        db.rename_folder(folder_id, name)
+    if "parent_id" in fields:
+        pid = req.parent_id
+        if pid is not None:
+            if pid == folder_id:
+                raise HTTPException(400, "A folder can't be its own parent.")
+            if not db.get_folder(pid):
+                raise HTTPException(404, "Parent folder not found.")
+            if _is_descendant(folder_id, pid):
+                raise HTTPException(400, "Can't move a folder into its own subfolder.")
+        db.set_folder_parent(folder_id, pid)
+    return {"ok": True}
+
+
+@app.delete("/api/folders/{folder_id}")
+def remove_folder(folder_id: int):
+    if not db.get_folder(folder_id):
+        raise HTTPException(404, "Folder not found.")
+    db.delete_folder(folder_id)  # papers inside fall back to Uncategorized
+    return {"ok": True}
+
+
+# --------------------------------------------------------------- helpers
+
+def _is_descendant(folder_id, candidate):
+    """True if `candidate` lies in the subtree rooted at `folder_id` (used to
+    reject moves that would create a cycle)."""
+    children = {}
+    for f in db.list_folders():
+        children.setdefault(f["parent_id"], []).append(f["id"])
+    stack = list(children.get(folder_id, []))
+    while stack:
+        n = stack.pop()
+        if n == candidate:
+            return True
+        stack.extend(children.get(n, []))
+    return False
+
+
+def _require_ai():
+    if not ai.has_api_key():
+        raise HTTPException(
+            400,
+            "AI features are disabled because ANTHROPIC_API_KEY is not set. "
+            "Add it to your .env file and restart.",
+        )
+
+
+# ------------------------------------------------------------ static files
+
+# Mount the frontend last so /api/* routes take priority.
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
