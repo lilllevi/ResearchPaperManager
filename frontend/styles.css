@@ -1226,6 +1226,63 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
 .rq-clear:hover { background: var(--surface-sunk); color: var(--text); }
 .reply-quote:not(.hidden) + .chat-input-row { border-top: 0; padding-top: 8px; }
 
+/* "Peter explains" audio card — floats bottom-left inside the viewer (so it
+   also shows in fullscreen), above the PDF but below the fullscreen chat. */
+.peter-player {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 900;
+  width: min(360px, calc(100% - 36px));
+  max-height: calc(100% - 110px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  animation: pop .16s ease;
+}
+.peter-head { display: flex; align-items: center; justify-content: space-between; }
+.peter-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.peter-head button {
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--pill);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.peter-head button svg { width: 14px; height: 14px; }
+.peter-head button:hover { background: var(--surface-soft); color: var(--text); }
+.peter-status:empty { display: none; }
+.peter-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-soft);
+}
+.peter-status .disc-spinner { flex-shrink: 0; width: 16px; height: 16px; border-width: 2px; }
+#peterAudio { width: 100%; height: 36px; }
+.peter-actions { display: flex; gap: 8px; }
+.peter-actions .btn-ghost { padding: 6px 12px; font-size: 12px; }
+.peter-transcript {
+  overflow-y: auto;
+  min-height: 0;
+  max-height: 260px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.peter-transcript p { margin: 0 0 7px; }
+.peter-transcript strong { color: var(--text); }
+
 /* threads inside the fullscreen bubble */
 .fs-chat-head .fs-thread-back {
   width: auto;

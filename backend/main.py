@@ -317,6 +317,67 @@ def summarize_selection(paper_id: int, req: ChatRequest):
     return {"summary": summary, "message_uid": uid}
 
 
+# ------------------------------------------------------ "Peter explains" audio
+# A parody audio explainer (Peter Griffin explains the paper to Stewie): a
+# Gemini-written dialogue performed by Gemini multi-speaker TTS. One clip is
+# cached per paper in storage/audio/; regenerate=true makes a new take. It is
+# deliberately kept out of the chat history.
+
+def _peter_response(paper_id, meta, cached):
+    return {
+        "transcript": meta["transcript"],
+        "created_at": meta["created_at"],
+        "audio_url": f"/api/papers/{paper_id}/peter/audio?v={int(meta['created_at'])}",
+        "cached": cached,
+    }
+
+
+def _paper_or_404(paper_id):
+    paper = db.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+    return paper
+
+
+@app.get("/api/papers/{paper_id}/peter")
+def peter_status(paper_id: int):
+    meta = store.read_peter(_paper_or_404(paper_id)["uid"])
+    if not meta:
+        raise HTTPException(404, "No clip yet.")
+    return _peter_response(paper_id, meta, True)
+
+
+@app.post("/api/papers/{paper_id}/peter")
+def peter_explains(paper_id: int, regenerate: bool = False):
+    _require_ai()
+    paper = _paper_or_404(paper_id)
+    if not regenerate:
+        meta = store.read_peter(paper["uid"])
+        if meta:
+            return _peter_response(paper_id, meta, True)
+    # Papers rebuilt from sidecars can have an empty full_text in the cache;
+    # the page-text sidecar always has it.
+    text = paper.get("full_text") or "\n".join(store.read_pages(paper["uid"]))
+    if not text.strip():
+        raise HTTPException(400, "This paper has no extracted text to explain.")
+    try:
+        script = ai.peter_explains_script(paper["title"], text)
+        wav = ai.speak_dialogue(script)
+    except ai.GeminiError as e:
+        raise HTTPException(502, str(e))
+    meta = {"transcript": script, "created_at": db.now()}
+    store.write_peter(paper["uid"], wav, script, meta["created_at"])
+    return _peter_response(paper_id, meta, False)
+
+
+@app.get("/api/papers/{paper_id}/peter/audio")
+def peter_audio(paper_id: int):
+    wav_path, _ = store.peter_paths(_paper_or_404(paper_id)["uid"])
+    if not wav_path.exists():
+        raise HTTPException(404, "No clip yet.")
+    return FileResponse(wav_path, media_type="audio/wav")
+
+
 # ------------------------------------------------------------ chat threads
 # Any assistant message can have a thread: a separate conversation branching
 # off it. Thread replies are stored with parent_uid and never appear in (or

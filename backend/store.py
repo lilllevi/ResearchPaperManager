@@ -14,6 +14,7 @@ files that sync safely:
     storage/folders/<uid>.json    one folder         tiny, mergeable
     storage/library-chat.json     cross-corpus chat  append-mostly
     storage/interests.json        typed-in research interests (recommendations)
+    storage/audio/<uid>-peter.*   "Peter explains" clip (.wav) + transcript (.json)
     cache/papers.db               derived — NOT in storage/, never synced
 
 Everything that changes is small, per-entity, and text. Two machines editing
@@ -42,6 +43,7 @@ PAPERS_DIR = STORAGE_DIR / "papers"
 FOLDERS_DIR = STORAGE_DIR / "folders"
 LIBRARY_CHAT_PATH = STORAGE_DIR / "library-chat.json"
 INTERESTS_PATH = STORAGE_DIR / "interests.json"
+AUDIO_DIR = STORAGE_DIR / "audio"
 
 # Page boundaries inside the .txt sidecar. Form feed is the conventional page
 # break and is stripped from extracted text so it can't appear in the content.
@@ -186,6 +188,29 @@ def write_library_chat():
     _write_atomic(LIBRARY_CHAT_PATH, _dump({"chat": db.get_messages("library")}))
 
 
+# ----------------------------------------------------- "Peter explains" audio
+# One cached clip per paper, replaced by "New take". Written once per
+# generation (immutable in between), so it syncs like the PDFs do.
+
+def peter_paths(uid):
+    return AUDIO_DIR / f"{uid}-peter.wav", AUDIO_DIR / f"{uid}-peter.json"
+
+
+def write_peter(uid, wav, script, created_at):
+    wav_path, meta_path = peter_paths(uid)
+    _write_atomic(wav_path, wav)
+    _write_atomic(meta_path, _dump({"transcript": script, "created_at": created_at}))
+
+
+def read_peter(uid):
+    """The saved transcript/metadata, or None if there's no complete clip."""
+    wav_path, meta_path = peter_paths(uid)
+    data, _ = _read_json(meta_path)
+    if not isinstance(data, dict) or not wav_path.exists():
+        return None
+    return data
+
+
 # ------------------------------------------------------------- interests
 # Stored only here (not in the DB): it's one tiny list, read on demand.
 
@@ -206,6 +231,8 @@ def delete_paper_files(uid, remove_pdf=True):
         path.unlink(missing_ok=True)
     if remove_pdf:
         (db.UPLOADS_DIR / f"{uid}.pdf").unlink(missing_ok=True)
+    for path in peter_paths(uid):
+        path.unlink(missing_ok=True)
 
 
 def delete_folder_file(uid):

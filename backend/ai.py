@@ -6,11 +6,15 @@ The API key is read from the environment (GEMINI_API_KEY), never hardcoded.
 The default model is gemini-2.5-flash, overridable via RPM_MODEL.
 """
 
+import base64
+import io
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
+import wave
 
 MODEL = os.environ.get("RPM_MODEL", "gemini-flash-latest")
 # Embedding model for arXiv semantic search / recommendations. gemini-embedding-001
@@ -407,3 +411,141 @@ def arxiv_queries_for_interests(papers, n=4, interests=None):
     )
     raw = _complete_resilient(system, [{"role": "user", "content": listing}], max_tokens=600, json_mode=True)
     return _parse_query_list(raw, n)
+
+
+# --------------------------------------------------- "Peter explains" audio
+# A parody explainer: Gemini writes a short Peter/Stewie Griffin dialogue about
+# the paper, then Gemini's multi-speaker TTS performs it with two built-in
+# voices directed to play the characters. (No voice cloning of the actors.)
+
+TTS_MODEL = os.environ.get("RPM_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+TTS_FALLBACK_MODEL = os.environ.get("RPM_TTS_FALLBACK_MODEL", "gemini-2.5-flash-preview-tts")
+PETER_VOICE = os.environ.get("RPM_PETER_VOICE", "Fenrir")    # excitable
+STEWIE_VOICE = os.environ.get("RPM_STEWIE_VOICE", "Iapetus")  # clear, crisp
+TTS_TIMEOUT_S = 300
+
+_SPEAKER_RE = re.compile(r"^\W*(peter|stewie)\W*:\s*(.*)$", re.IGNORECASE)
+
+
+def peter_explains_script(title, full_text):
+    """A ~2-3 minute Peter/Stewie dialogue explaining the paper's core ideas.
+    Returns normalized text: one 'Peter: …' / 'Stewie: …' turn per line."""
+    system = (
+        "You write short comedic audio sketches in the style of Family Guy. "
+        "Peter Griffin is explaining a research paper to Stewie Griffin. Peter "
+        "is loud, goofy and easily sidetracked, and explains things through "
+        "dopey everyday analogies (beer, the Drunken Clam, Quahog), but he "
+        "gets the substance right. Stewie is a posh, sarcastic genius baby who "
+        "asks sharp questions, corrects Peter when he garbles something, and "
+        "sums up the real idea precisely. The science must be faithful to the "
+        "paper: never invent results, numbers or claims that are not in it. "
+        "Keep it PG-13 and good-natured."
+    )
+    user = (
+        f"Write the sketch for the paper \"{title}\". Cover, in order: the "
+        "problem the paper tackles, its key idea, how the method works, the "
+        "main result, and why it matters. 350-450 words total, 14-24 short "
+        "turns alternating between the two. Output ONLY dialogue lines, each "
+        "formatted exactly as 'Peter: ...' or 'Stewie: ...' — no title, no "
+        "stage directions, no sound effects, no markdown.\n\n"
+        f"Paper text:\n{(full_text or '')[:120_000]}"
+    )
+    raw = _complete_resilient(system, [{"role": "user", "content": user}], max_tokens=1500)
+    return normalize_dialogue(raw)
+
+
+def normalize_dialogue(raw):
+    """Keep only Peter/Stewie turns; fold wrapped lines into the previous turn
+    and strip markdown/stage directions."""
+    turns = []
+    for line in (raw or "").splitlines():
+        if re.fullmatch(r"\s*([*_]).+\1\s*", line) and not _SPEAKER_RE.match(re.sub(r"[*_]", "", line)):
+            continue  # a whole-line *stage direction*
+        line = re.sub(r"[*_#`]", "", line).strip()
+        line = re.sub(r"\[[^\]]*\]", "", line).strip()  # [pause], [laughs]
+        if not line:
+            continue
+        m = _SPEAKER_RE.match(line)
+        if m:
+            name = "Peter" if m.group(1).lower() == "peter" else "Stewie"
+            text = re.sub(r"^\([^)]*\)\s*", "", m.group(2)).strip()  # "(sighing) ..."
+            if text:
+                turns.append([name, text])
+        elif turns:
+            turns[-1][1] += " " + line
+    if not turns:
+        raise GeminiError("Couldn't write the Peter & Stewie script (the model returned no dialogue).")
+    return "\n".join(f"{name}: {text}" for name, text in turns)
+
+
+def speak_dialogue(script):
+    """Perform a Peter/Stewie script with Gemini multi-speaker TTS.
+    Returns WAV bytes (16-bit mono PCM, usually 24 kHz)."""
+    prompt = (
+        "Perform this comedy scene as a lively two-person audio sketch.\n"
+        "Peter: a big, loud, goofy middle-aged dad from Rhode Island with a "
+        "thick New England accent; boisterous, dim but enthusiastic, with "
+        "wheezy chuckles and fast, rambling delivery.\n"
+        "Stewie: a precocious baby with a crisp, posh, upper-class British "
+        "accent; theatrical, withering and precise, with dry comic timing.\n\n"
+        + script
+    )
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "multiSpeakerVoiceConfig": {
+                    "speakerVoiceConfigs": [
+                        {"speaker": "Peter",
+                         "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": PETER_VOICE}}},
+                        {"speaker": "Stewie",
+                         "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": STEWIE_VOICE}}},
+                    ]
+                }
+            },
+        },
+    }
+
+    def call(model):
+        return _post(f"{API_BASE}/models/{model}:generateContent", body, timeout=TTS_TIMEOUT_S)
+
+    # Same idea as _complete_resilient: retry an overloaded model briefly,
+    # then try the older TTS model once.
+    data, delay, start = None, RETRY_FIRST_DELAY_S, time.monotonic()
+    while data is None:
+        try:
+            data = call(TTS_MODEL)
+        except GeminiError as e:
+            if e.code not in (429, 500, 503):
+                raise
+            remaining = RETRY_BUDGET_S - (time.monotonic() - start)
+            if e.code == 429 or remaining <= 0:
+                if not TTS_FALLBACK_MODEL or TTS_FALLBACK_MODEL == TTS_MODEL:
+                    raise
+                data = call(TTS_FALLBACK_MODEL)
+                break
+            time.sleep(min(delay, remaining))
+            delay *= 2
+
+    pcm, rate = b"", 24000
+    for cand in data.get("candidates", [])[:1]:
+        for part in cand.get("content", {}).get("parts", []):
+            inline = part.get("inlineData") or {}
+            if inline.get("data"):
+                pcm += base64.b64decode(inline["data"])
+                m = re.search(r"rate=(\d+)", inline.get("mimeType", ""))
+                if m:
+                    rate = int(m.group(1))
+    if not pcm:
+        reason = (data.get("candidates") or [{}])[0].get("finishReason") or \
+            data.get("promptFeedback", {}).get("blockReason") or "no audio returned"
+        raise GeminiError(f"Gemini TTS produced no audio ({reason}).")
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return buf.getvalue()

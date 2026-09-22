@@ -112,6 +112,10 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2c-1.8-1-4-1.4-6.2-1V18c2.2-.4 4.4 0 6.2 1 1.8-1 4-1.4 6.2-1V5.2c-2.2-.4-4.4 0-6.2 1Z"/><path d="M12 6.2V19.2"/></svg>
             <span>Prereading</span>
           </button>
+          <button id="peterBtn" class="icon-label-btn" title="Listen: Peter Griffin explains this paper to Stewie" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 9.5v5h3.5l4.5 4v-13l-4.5 4H4.5Z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+            <span>Peter explains</span>
+          </button>
           <button id="bookmarkBtn" class="icon-btn-round" title="Bookmark this paper" disabled>
             <svg class="icon-bm-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-4-6.5 4V5.5a1 1 0 0 1 1-1Z"/></svg>
             <svg class="icon-bm-on" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-4-6.5 4V5.5a1 1 0 0 1 1-1Z"/></svg>
@@ -187,6 +191,23 @@
       <!-- "Reply" pill shown when text is selected inside an AI answer (side
            panel or fullscreen bubble). Inside #viewer so it shows in fullscreen. -->
       <button type="button" id="chatReplyPill" class="chat-reply-pill hidden">Reply</button>
+
+      <!-- "Peter explains" audio player. Inside #viewer so it works in fullscreen. -->
+      <div id="peterPlayer" class="peter-player hidden">
+        <div class="peter-head">
+          <span class="peter-title">Peter explains</span>
+          <button type="button" id="peterClose" title="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+        <div id="peterStatus" class="peter-status"></div>
+        <audio id="peterAudio" controls preload="auto" class="hidden"></audio>
+        <div id="peterActions" class="peter-actions hidden">
+          <button type="button" id="peterTranscriptBtn" class="btn-ghost">Transcript</button>
+          <button type="button" id="peterRegenBtn" class="btn-ghost" title="Write and record a new version">New take</button>
+        </div>
+        <div id="peterTranscript" class="peter-transcript hidden"></div>
+      </div>
 
       <!-- Floating toolbar shown when text is selected in the PDF -->
       <div id="selectionToolbar" class="selection-toolbar hidden">

@@ -12,6 +12,12 @@ papers. Runs entirely on your own machine (Windows Surface Book / Windows 11).
   the pages it used. Hover an answer and click **Reply** (or select part of it)
   to start a **thread**: a separate follow-up conversation about that answer,
   shown as a single "N replies" link so the main chat stays tidy.
+- **Peter explains** — a parody audio clip of Peter Griffin explaining the
+  paper's core ideas to Stewie. Gemini writes the dialogue and Gemini's
+  text-to-speech performs it with two built-in voices directed to play the
+  characters (not the real actors' voices). The first play takes ~1–2 minutes
+  and uses TTS quota; the clip (~9 MB WAV) is then cached per paper in
+  `storage/audio/`, and "New take" records a fresh one.
 - **Summarize** the whole paper, or just a highlighted passage, with one click.
 - **A searchable library** of everything you've uploaded, plus a **cross-corpus
   chatbot** that answers questions across your entire collection and cites which
@@ -212,6 +218,10 @@ Settings live in `.env`:
   (default `gemini-embedding-001`).
 - `RPM_FALLBACK_MODEL` — used to write arXiv queries when the main model is
   overloaded (default `gemini-flash-lite-latest`).
+- `RPM_TTS_MODEL` / `RPM_TTS_FALLBACK_MODEL` — text-to-speech models for
+  "Peter explains" (defaults `gemini-3.1-flash-tts-preview` /
+  `gemini-2.5-flash-preview-tts`); `RPM_PETER_VOICE` / `RPM_STEWIE_VOICE` pick
+  the built-in voices (defaults `Fenrir` / `Iapetus`).
 
 Ranking knobs (recency half-life, profile size, pool sizes, cache lifetimes)
 are constants at the top of `backend/discover.py`. Gemini's free tier embeds

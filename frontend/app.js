@@ -591,6 +591,7 @@ async function openPaper(id) {
   $("#viewerTitle").textContent = state.currentTitle;
   $("#summarizeBtn").disabled = !state.aiEnabled;
   $("#prereadingBtn").disabled = !state.aiEnabled;
+  $("#peterBtn").disabled = !state.aiEnabled;
   $("#deletePaperBtn").disabled = false;
   syncBookmarkButton();
   $("#zoomIn").disabled = false;
@@ -607,6 +608,7 @@ async function openPaper(id) {
   state.chatMode = "doc";
   $("#chatTitle").textContent = state.currentTitle;
   leaveFsThread();
+  hidePeter();
   loadDocChat();
 
   state.highlights = await api(`/api/papers/${id}/highlights`);
@@ -1405,6 +1407,84 @@ function generatePrereading() {
   );
 }
 
+// ------------------------------------------------------- Peter explains
+// Plays a parody audio clip: Peter Griffin explains the paper to Stewie (a
+// Gemini-written dialogue performed by Gemini TTS). One clip is cached per
+// paper on the server, so replays are instant; "New take" regenerates.
+let peterRequest = 0;  // ignore responses that arrive after the user moved on
+
+async function peterExplains(regenerate) {
+  const paperId = state.currentPaperId;
+  if (!paperId || !requireAi()) return;
+  const req = ++peterRequest;
+  const audio = $("#peterAudio");
+  audio.pause();
+  $("#peterPlayer").classList.remove("hidden");
+  audio.classList.add("hidden");
+  $("#peterActions").classList.add("hidden");
+  $("#peterTranscript").classList.add("hidden");
+  $("#peterTranscriptBtn").textContent = "Transcript";
+  $("#peterRegenBtn").disabled = true;
+  setPeterStatus(regenerate
+    ? "Peter's taking another crack at it… (about 30–90 s)"
+    : "Peter's reading the paper… (the first time takes about 30–90 s)", true);
+  try {
+    const res = await api(
+      `/api/papers/${paperId}/peter` + (regenerate ? "?regenerate=true" : ""),
+      { method: "POST" }
+    );
+    if (req !== peterRequest || state.currentPaperId !== paperId) return;
+    renderPeterTranscript(res.transcript);
+    setPeterStatus("");
+    audio.src = res.audio_url;
+    audio.classList.remove("hidden");
+    $("#peterActions").classList.remove("hidden");
+    audio.play().catch(() => {});  // autoplay may be blocked; controls are there
+  } catch (e) {
+    if (req !== peterRequest) return;
+    setPeterStatus("Couldn't make the clip: " + e.message);
+    $("#peterActions").classList.remove("hidden");
+  } finally {
+    if (req === peterRequest) $("#peterRegenBtn").disabled = false;
+  }
+}
+
+function setPeterStatus(text, loading = false) {
+  const el = $("#peterStatus");
+  el.innerHTML = "";
+  if (!text) return;
+  if (loading) {
+    const spin = document.createElement("span");
+    spin.className = "disc-spinner";
+    el.appendChild(spin);
+  }
+  const msg = document.createElement("span");
+  msg.textContent = text;
+  el.appendChild(msg);
+}
+
+function renderPeterTranscript(script) {
+  const box = $("#peterTranscript");
+  box.innerHTML = "";
+  for (const line of (script || "").split("\n")) {
+    const m = line.match(/^(Peter|Stewie):\s*(.*)$/);
+    if (!m) continue;
+    const p = document.createElement("p");
+    const who = document.createElement("strong");
+    who.textContent = m[1] + ": ";
+    p.append(who, document.createTextNode(m[2]));
+    box.appendChild(p);
+  }
+}
+
+function hidePeter() {
+  peterRequest++;
+  const audio = $("#peterAudio");
+  audio.pause();
+  audio.removeAttribute("src");
+  $("#peterPlayer").classList.add("hidden");
+}
+
 // -------------------------------------------------------- highlight list
 function renderHighlightList() {
   const box = $("#highlightList");
@@ -1462,7 +1542,7 @@ async function deletePaperById(id, title) {
     $("#viewerTitle").textContent = "Select or upload a paper to begin";
     $("#chatMessages").innerHTML = "";
     $("#highlightList").innerHTML = "";
-    ["#summarizeBtn", "#prereadingBtn", "#deletePaperBtn", "#zoomIn", "#zoomOut", "#fullscreenBtn"].forEach((s) => ($(s).disabled = true));
+    ["#summarizeBtn", "#prereadingBtn", "#peterBtn", "#deletePaperBtn", "#zoomIn", "#zoomOut", "#fullscreenBtn"].forEach((s) => ($(s).disabled = true));
   }
   await loadPapers();
 }
@@ -2812,6 +2892,14 @@ function wireEvents() {
   });
   $("#summarizeBtn").addEventListener("click", summarizePaper);
   $("#prereadingBtn").addEventListener("click", generatePrereading);
+  $("#peterBtn").addEventListener("click", () => peterExplains(false));
+  $("#peterRegenBtn").addEventListener("click", () => peterExplains(true));
+  $("#peterClose").addEventListener("click", hidePeter);
+  $("#peterTranscriptBtn").addEventListener("click", () => {
+    const t = $("#peterTranscript");
+    t.classList.toggle("hidden");
+    $("#peterTranscriptBtn").textContent = t.classList.contains("hidden") ? "Transcript" : "Hide transcript";
+  });
   $("#deletePaperBtn").addEventListener("click", deletePaper);
   $("#zoomIn").addEventListener("click", () => zoomBy(1.15));
   $("#zoomOut").addEventListener("click", () => zoomBy(1 / 1.15));
