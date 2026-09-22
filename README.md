@@ -118,13 +118,21 @@ To back up your library, copy `storage/`. To reset everything, delete it.
 
 ## Using it on more than one computer
 
-Point any file-sync service — OneDrive, Dropbox, Syncthing, iCloud — at the
-`storage/` folder, on each machine. That's the whole setup. There is nothing to
-configure in the app.
+Two things travel separately, on purpose:
 
-**On Windows with OneDrive**, the simplest route is to keep the project inside
-your OneDrive folder, or to move just `storage/` there and leave a directory
-junction behind:
+| What | How it syncs | Why |
+| --- | --- | --- |
+| The **code** (`backend/`, `frontend/`, `run.ps1`) | git | small, text, mergeable, and you want its history |
+| Your **library** (`storage/`) | OneDrive | big binaries that git would bloat on forever |
+
+Don't let both sync the same files: `storage/` is in `.gitignore`, and `cache/`
+must never be synced by anything.
+
+### Moving `storage/` into OneDrive (first computer, once)
+
+Any file-sync service works — OneDrive, Dropbox, Syncthing, iCloud. Point it at
+`storage/` and the app needs no configuration. On Windows, move the folder into
+OneDrive and leave a directory junction behind:
 
 ```powershell
 # from the project root, with the app closed
@@ -132,8 +140,26 @@ Move-Item storage "$env:OneDrive\ResearchPaperManager-storage"
 New-Item -ItemType Junction -Path storage -Target "$env:OneDrive\ResearchPaperManager-storage"
 ```
 
-Do the same on the second machine (the junction, not the move — OneDrive will
-have already synced the folder there).
+### Setting up the second computer
+
+```powershell
+git clone <your repo url> ResearchPaperManager
+cd ResearchPaperManager
+
+# 1. Your API key is not in the repo - create .env from the template.
+Copy-Item .env.example .env
+notepad .env          # paste your GEMINI_API_KEY
+
+# 2. Point storage/ at the OneDrive copy (which has already synced here).
+New-Item -ItemType Junction -Path storage -Target "$env:OneDrive\ResearchPaperManager-storage"
+
+# 3. Run it. The first launch rebuilds cache/papers.db from storage/.
+.\run.ps1
+```
+
+From then on: `git pull` for code changes, and OneDrive handles the papers by
+itself.
+
 
 Why this is safe: everything that changes is small, per-item and text, so two
 machines editing different papers never write the same file. The one thing that
