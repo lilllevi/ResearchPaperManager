@@ -30,6 +30,7 @@ import rag
 import ai
 import pdf_utils
 import store
+import discover
 
 FRONTEND_DIR = BASE_DIR / "frontend"
 
@@ -67,6 +68,10 @@ app = FastAPI(title="Research Paper Manager", lifespan=lifespan)
 class ChatRequest(BaseModel):
     question: str
     selection: str | None = None
+    # Thread replies: the assistant message being replied to, and optionally
+    # the part of it the user selected.
+    parent_uid: str | None = None
+    quote: str | None = None
 
 
 class HighlightRequest(BaseModel):
@@ -82,6 +87,15 @@ class PaperUpdate(BaseModel):
     title: str | None = None
     folder_id: int | None = None
     bookmarked: bool | None = None
+
+
+class ArxivAdd(BaseModel):
+    arxiv_id: str
+    title: str | None = None
+
+
+class InterestsUpdate(BaseModel):
+    interests: list[str]
 
 
 class FolderCreate(BaseModel):
@@ -130,17 +144,15 @@ def get_papers():
     return db.list_papers()
 
 
-@app.post("/api/papers")
-async def upload_paper(file: UploadFile = File(...), title: str = Form(None)):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files are supported.")
-
+def ingest_pdf(data, filename, title=None, arxiv_id=None):
+    """Store, extract, index and persist a PDF. Shared by manual uploads and
+    "Add to library" from arXiv, so both produce identical papers.
+    Returns {"id", "title", "num_pages"}."""
     # The uid is this paper's stable identity everywhere: the PDF filename, the
     # text and JSON sidecars, and the row in the cache all key off it.
     uid = store.new_uid()
     stored_name = f"{uid}.pdf"
     dest = db.UPLOADS_DIR / stored_name
-    data = await file.read()
     dest.write_bytes(data)
 
     try:
@@ -159,10 +171,14 @@ async def upload_paper(file: UploadFile = File(...), title: str = Form(None)):
         except Exception:
             paper_title = ""
     if not paper_title:
-        paper_title = file.filename.rsplit(".", 1)[0]
+        paper_title = filename.rsplit(".", 1)[0]
+
+    # A hand-uploaded arXiv PDF carries its id in the page-1 margin stamp.
+    if not arxiv_id and pages:
+        arxiv_id = discover.arxiv_id_in_text(pages[0])
 
     paper_id = db.insert_paper(
-        paper_title, file.filename, stored_name, num_pages, full_text, uid
+        paper_title, filename, stored_name, num_pages, full_text, uid, arxiv_id
     )
     chunks = pdf_utils.chunk_pages(pages)
     if chunks:
@@ -176,6 +192,14 @@ async def upload_paper(file: UploadFile = File(...), title: str = Form(None)):
     return {"id": paper_id, "title": paper_title, "num_pages": num_pages}
 
 
+@app.post("/api/papers")
+async def upload_paper(file: UploadFile = File(...), title: str = Form(None)):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are supported.")
+    data = await file.read()
+    return ingest_pdf(data, file.filename, title)
+
+
 @app.get("/api/papers/{paper_id}")
 def paper_meta(paper_id: int):
     paper = db.get_paper(paper_id)
@@ -187,7 +211,18 @@ def paper_meta(paper_id: int):
         "filename": paper["filename"],
         "num_pages": paper["num_pages"],
         "uploaded_at": paper["uploaded_at"],
+        "arxiv_id": paper.get("arxiv_id"),
+        "last_viewed": paper.get("last_viewed"),
     }
+
+
+@app.post("/api/papers/{paper_id}/view")
+def mark_viewed(paper_id: int):
+    """Called when a paper is opened in the viewer; feeds recommendations."""
+    if not db.get_paper(paper_id):
+        raise HTTPException(404, "Paper not found.")
+    db.set_last_viewed(paper_id)
+    return {"ok": True}
 
 
 @app.patch("/api/papers/{paper_id}")
@@ -250,8 +285,8 @@ def summarize(paper_id: int):
     summary = ai.summarize_document(paper["title"], paper["full_text"])
     # Persist the summary into the document chat so it survives restarts.
     db.add_message("doc", paper_id, "user", "Summarize this paper.")
-    db.add_message("doc", paper_id, "assistant", summary)
-    return {"summary": summary}
+    uid = db.add_message("doc", paper_id, "assistant", summary)
+    return {"summary": summary, "message_uid": uid}
 
 
 @app.post("/api/papers/{paper_id}/prereading")
@@ -263,8 +298,8 @@ def prereading(paper_id: int):
     guide = ai.generate_prereading(paper["title"], paper["full_text"])
     # Persist into the document chat so it survives restarts, like summaries.
     db.add_message("doc", paper_id, "user", "Generate a prereading guide.")
-    db.add_message("doc", paper_id, "assistant", guide)
-    return {"prereading": guide}
+    uid = db.add_message("doc", paper_id, "assistant", guide)
+    return {"prereading": guide, "message_uid": uid}
 
 
 @app.post("/api/papers/{paper_id}/summarize-selection")
@@ -278,15 +313,66 @@ def summarize_selection(paper_id: int, req: ChatRequest):
         raise HTTPException(400, "No passage provided.")
     summary = ai.summarize_passage(paper["title"], passage)
     db.add_message("doc", paper_id, "user", f"Summarize this passage:\n\n{passage}")
-    db.add_message("doc", paper_id, "assistant", summary)
-    return {"summary": summary}
+    uid = db.add_message("doc", paper_id, "assistant", summary)
+    return {"summary": summary, "message_uid": uid}
+
+
+# ------------------------------------------------------------ chat threads
+# Any assistant message can have a thread: a separate conversation branching
+# off it. Thread replies are stored with parent_uid and never appear in (or
+# feed the AI history of) the main chat.
+
+MAX_QUOTE_LEN = 4000
+
+
+def _with_quote(content, quote):
+    if not quote:
+        return content
+    return f'Regarding this part of your earlier answer:\n"""\n{quote}\n"""\n\n{content}'
+
+
+def _chat_context(scope, paper_id, req):
+    """(history, question for the AI, cleaned quote) for a main-chat or
+    thread message. A thread's history is the exchange it branches from
+    followed by the thread itself, so the AI knows what's being discussed."""
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(400, "Empty question.")
+    quote = (req.quote or "").strip()[:MAX_QUOTE_LEN] or None
+    if not req.parent_uid:
+        return db.get_main_messages(scope, paper_id), question, None
+    thread = db.get_thread(scope, paper_id, req.parent_uid)
+    if not thread:
+        raise HTTPException(404, "The message this thread replies to no longer exists.")
+    parent, prompt, replies = thread
+    # The AI sees the last 6 history messages; keep the anchor exchange in
+    # view by trimming the thread, not the message it branches from.
+    history = ([prompt] if prompt else []) + [parent]
+    history += [
+        {"role": r["role"], "content": _with_quote(r["content"], r.get("quote"))}
+        for r in replies[-(6 - len(history)):]
+    ]
+    return history, _with_quote(question, quote), quote
+
+
+def _thread_response(scope, paper_id, parent_uid):
+    thread = db.get_thread(scope, paper_id, parent_uid)
+    if not thread:
+        raise HTTPException(404, "Thread not found.")
+    parent, prompt, replies = thread
+    return {"parent": parent, "prompt": prompt, "messages": replies}
 
 
 # ------------------------------------------------------------ document chat
 
 @app.get("/api/papers/{paper_id}/chat")
 def doc_chat_history(paper_id: int):
-    return db.get_messages("doc", paper_id)
+    return db.get_main_messages("doc", paper_id)
+
+
+@app.get("/api/papers/{paper_id}/chat/thread/{parent_uid}")
+def doc_chat_thread(paper_id: int, parent_uid: str):
+    return _thread_response("doc", paper_id, parent_uid)
 
 
 @app.post("/api/papers/{paper_id}/chat")
@@ -295,26 +381,29 @@ def doc_chat(paper_id: int, req: ChatRequest):
     paper = db.get_paper(paper_id)
     if not paper:
         raise HTTPException(404, "Paper not found.")
-    question = req.question.strip()
-    if not question:
-        raise HTTPException(400, "Empty question.")
+    history, question, quote = _chat_context("doc", paper_id, req)
 
-    history = db.get_messages("doc", paper_id)
-    # Retrieve context from this paper. If a passage is selected, bias the
-    # search toward it by appending it to the query.
-    search_query = question if not req.selection else f"{question}\n{req.selection}"
+    # Retrieve context from this paper. If a passage is selected (in the PDF,
+    # or quoted from an earlier answer), bias the search toward it.
+    extra = req.selection or quote
+    search_query = question if not extra else f"{req.question.strip()}\n{extra}"
     hits = rag.index.search(search_query, top_k=6, paper_id=paper_id)
 
     answer = ai.answer_about_document(
         paper["title"], question, hits, history, selection=req.selection
     )
 
-    user_content = question
+    user_content = req.question.strip()
     if req.selection:
-        user_content = f"[Re: highlighted passage]\n{question}"
-    db.add_message("doc", paper_id, "user", user_content)
-    db.add_message("doc", paper_id, "assistant", answer)
-    return {"answer": answer, "sources": [{"page": h["page"]} for h in hits]}
+        user_content = f"[Re: highlighted passage]\n{user_content}"
+    user_uid = db.add_message("doc", paper_id, "user", user_content, req.parent_uid, quote)
+    uid = db.add_message("doc", paper_id, "assistant", answer, req.parent_uid)
+    return {
+        "answer": answer,
+        "sources": [{"page": h["page"]} for h in hits],
+        "message_uid": uid,
+        "user_uid": user_uid,
+    }
 
 
 # --------------------------------------------------------------- highlights
@@ -349,24 +438,96 @@ def remove_highlight(highlight_id: int):
 
 @app.get("/api/library/chat")
 def library_chat_history():
-    return db.get_messages("library")
+    return db.get_main_messages("library")
+
+
+@app.get("/api/library/chat/thread/{parent_uid}")
+def library_chat_thread(parent_uid: str):
+    return _thread_response("library", None, parent_uid)
 
 
 @app.post("/api/library/chat")
 def library_chat(req: ChatRequest):
     _require_ai()
-    question = req.question.strip()
-    if not question:
-        raise HTTPException(400, "Empty question.")
-
-    history = db.get_messages("library")
-    hits = rag.index.search(question, top_k=8)
+    history, question, quote = _chat_context("library", None, req)
+    search_query = question if not quote else f"{req.question.strip()}\n{quote}"
+    hits = rag.index.search(search_query, top_k=8)
     answer = ai.answer_across_corpus(question, hits, history)
 
-    db.add_message("library", None, "user", question)
-    db.add_message("library", None, "assistant", answer)
+    user_uid = db.add_message("library", None, "user", req.question.strip(), req.parent_uid, quote)
+    uid = db.add_message("library", None, "assistant", answer, req.parent_uid)
     sources = [{"paper_id": h["paper_id"], "title": h["title"], "page": h["page"]} for h in hits]
-    return {"answer": answer, "sources": sources}
+    return {"answer": answer, "sources": sources, "message_uid": uid, "user_uid": user_uid}
+
+
+# ------------------------------------------------------------ arXiv discovery
+
+@app.get("/api/arxiv/search")
+def arxiv_search(q: str = "", limit: int = 25):
+    """Semantic search across arXiv (Gemini queries + embeddings rerank, with
+    recency weighting); keyword fallback without a Gemini key."""
+    try:
+        return discover.search(q, limit=max(1, min(limit, 50)))
+    except discover.DiscoverError as e:
+        raise HTTPException(502 if q.strip() else 400, str(e))
+
+
+MAX_INTERESTS = 20
+MAX_INTEREST_LEN = 120
+
+
+@app.get("/api/interests")
+def get_interests():
+    return {"interests": store.read_interests()}
+
+
+@app.put("/api/interests")
+def put_interests(req: InterestsUpdate):
+    """Replace the typed-in research interests used for recommendations."""
+    cleaned, seen = [], set()
+    for raw in req.interests:
+        text = " ".join(str(raw).split())[:MAX_INTEREST_LEN]
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            cleaned.append(text)
+    cleaned = cleaned[:MAX_INTERESTS]
+    store.write_interests(cleaned)
+    return {"interests": cleaned}
+
+
+@app.get("/api/arxiv/recommendations")
+def arxiv_recommendations(refresh: bool = False, limit: int = 20):
+    """arXiv papers related to what you've recently uploaded and viewed.
+    Cached for a few hours; refresh=true recomputes."""
+    try:
+        return discover.recommendations(refresh=refresh, limit=max(1, min(limit, 50)))
+    except discover.DiscoverError as e:
+        raise HTTPException(502, str(e))
+
+
+@app.post("/api/arxiv/add")
+def arxiv_add(req: ArxivAdd):
+    """Download an arXiv paper's PDF and run it through the normal ingest."""
+    aid = discover.normalize_arxiv_id(req.arxiv_id)
+    if not aid:
+        raise HTTPException(400, "That doesn't look like an arXiv id.")
+    title = (req.title or "").strip()
+    existing = discover.find_in_library({"arxiv_id": aid, "title": title})
+    if existing:
+        paper = db.get_paper(existing)
+        return {"id": existing, "title": paper["title"], "num_pages": paper["num_pages"],
+                "arxiv_id": aid, "already": True}
+    try:
+        if not title:
+            meta = discover.arxiv_lookup(aid)
+            if not meta:
+                raise HTTPException(404, f"arXiv has no paper {aid}.")
+            title = meta["title"]
+        data = discover.download_pdf(aid)
+    except discover.DiscoverError as e:
+        raise HTTPException(502, str(e))
+    result = ingest_pdf(data, f"{aid}.pdf", title, arxiv_id=aid)
+    return {**result, "arxiv_id": aid, "already": False}
 
 
 # ----------------------------------------------------------------- folders
@@ -439,7 +600,7 @@ def _require_ai():
     if not ai.has_api_key():
         raise HTTPException(
             400,
-            "AI features are disabled because ANTHROPIC_API_KEY is not set. "
+            "AI features are disabled because GEMINI_API_KEY is not set. "
             "Add it to your .env file and restart.",
         )
 

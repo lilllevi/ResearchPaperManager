@@ -9,11 +9,23 @@ papers. Runs entirely on your own machine (Windows Surface Book / Windows 11).
 - **Highlight text** — select any passage; your highlights are saved and
   re-appear every time you reopen the paper.
 - **Ask the AI about the open paper** — a side chat answers questions and cites
-  the pages it used.
+  the pages it used. Hover an answer and click **Reply** (or select part of it)
+  to start a **thread**: a separate follow-up conversation about that answer,
+  shown as a single "N replies" link so the main chat stays tidy.
 - **Summarize** the whole paper, or just a highlighted passage, with one click.
 - **A searchable library** of everything you've uploaded, plus a **cross-corpus
   chatbot** that answers questions across your entire collection and cites which
   papers it drew from.
+- **Semantic arXiv search** on the Dashboard (the landing screen): describe what
+  you want in plain language. Gemini turns it into arXiv queries, results are
+  reranked by meaning with Gemini embeddings, and recent papers rank higher.
+- **Recommendations** from arXiv based on the papers you've most recently added
+  and opened (cached for a few hours; **Refresh** recomputes them).
+- **Add to library** from any search result or recommendation: the PDF is
+  downloaded from arXiv and indexed like an upload, so you can highlight,
+  summarize and chat with it. Cards already in your library show **Open**.
+  Without a Gemini key, search falls back to plain arXiv keyword search (still
+  recency-boosted).
 
 Everything you create — papers, extracted text, highlights, chat history, and
 the search index — is stored on disk in `storage/` (a SQLite database plus the
@@ -29,6 +41,7 @@ PDF files). **Your data persists across restarts.**
 | Search / retrieval | BM25 (`rank-bm25`) | Pure Python; no embedding service or extra API key |
 | Storage | SQLite (built into Python) + PDF files on disk | Durable, zero-setup, survives restarts |
 | AI | Google Gemini (`gemini-2.5-flash`) | Fast, capable, large context window |
+| arXiv discovery | arXiv API (Atom, `urllib` + `xml.etree`) + Gemini embeddings (`gemini-embedding-001`, REST) | Stdlib only; responses and embeddings cached in `cache/papers.db` |
 
 The app is a local web app: a small server runs on your machine and you use it
 in your browser. Nothing is uploaded anywhere except the text sent to Google
@@ -52,7 +65,12 @@ summarize/chat features stay disabled until you add one.)
 
 ### 3. Start the app
 
-Open **PowerShell**, go to the project folder, and run the launcher:
+**Easiest:** double-click **Start Research Paper Manager.bat** in the project
+folder (or a Desktop shortcut to it). It opens a small minimized window that
+runs the server; your browser opens once the app is ready. Close that window to
+stop the app. Double-clicking again while it's running just reopens the browser.
+
+Or, from **PowerShell**, go to the project folder and run the launcher:
 
 ```powershell
 cd "$HOME\Desktop\ResearchPaperManager"
@@ -190,6 +208,15 @@ Settings live in `.env`:
   more capable).
 - `RPM_HOST` / `RPM_PORT` — where the local server listens (default
   `127.0.0.1:8000`).
+- `RPM_EMBED_MODEL` — embedding model for arXiv search/recommendations
+  (default `gemini-embedding-001`).
+- `RPM_FALLBACK_MODEL` — used to write arXiv queries when the main model is
+  overloaded (default `gemini-flash-lite-latest`).
+
+Ranking knobs (recency half-life, profile size, pool sizes, cache lifetimes)
+are constants at the top of `backend/discover.py`. Gemini's free tier embeds
+at most 100 texts per minute, so each search embeds at most `EMBED_NEW_MAX`
+new abstracts; raise it on a paid tier.
 
 ## Troubleshooting
 

@@ -184,6 +184,42 @@ def init_db() -> None:
         # sidecar too, so a bookmark set on one machine follows you to the other.
         if "bookmarked" not in cols:
             conn.execute("ALTER TABLE papers ADD COLUMN bookmarked INTEGER NOT NULL DEFAULT 0")
+        # Migration: arXiv discovery. arxiv_id (base id, no version) links a
+        # paper to arXiv so search/recommendations can say "In library";
+        # last_viewed is set whenever the paper is opened in the viewer and
+        # feeds the recommendation profile. Both are mirrored in the sidecar.
+        if "arxiv_id" not in cols:
+            conn.execute("ALTER TABLE papers ADD COLUMN arxiv_id TEXT")
+        if "last_viewed" not in cols:
+            conn.execute("ALTER TABLE papers ADD COLUMN last_viewed REAL")
+
+        # Migration: chat threads. uid is a message's stable identity (mirrored
+        # in sidecars); parent_uid links a thread reply to the assistant message
+        # it branches from (NULL = main chat); quote is the part of that
+        # message the user replied to, if they selected one.
+        mcols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
+        for col in ("uid", "parent_uid", "quote"):
+            if col not in mcols:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
+        conn.execute("UPDATE messages SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_uid)")
+
+        # Disk caches for arXiv discovery (API responses, generated queries,
+        # recommendation results, embeddings). Pure cache: safe to delete.
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS kv_cache (
+                key          TEXT PRIMARY KEY,
+                value        TEXT NOT NULL,
+                created_at   REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS embeddings (
+                key          TEXT PRIMARY KEY,
+                vec          BLOB NOT NULL,
+                created_at   REAL NOT NULL
+            );
+            """
+        )
         conn.commit()
 
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_papers_uid ON papers(uid)")
@@ -219,13 +255,13 @@ def backfill_uids() -> None:
 
 # ---------------------------------------------------------------- papers
 
-def insert_paper(title, filename, stored_name, num_pages, full_text, uid):
+def insert_paper(title, filename, stored_name, num_pages, full_text, uid, arxiv_id=None):
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO papers (uid, title, filename, stored_name, num_pages, full_text, uploaded_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (uid, title, filename, stored_name, num_pages, full_text, now()),
+            "INSERT INTO papers (uid, title, filename, stored_name, num_pages, full_text,"
+            " uploaded_at, arxiv_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (uid, title, filename, stored_name, num_pages, full_text, now(), arxiv_id),
         )
         conn.commit()
         return cur.lastrowid
@@ -263,8 +299,8 @@ def list_papers():
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, title, filename, num_pages, uploaded_at, folder_id, bookmarked "
-            "FROM papers ORDER BY uploaded_at DESC"
+            "SELECT id, title, filename, num_pages, uploaded_at, folder_id, bookmarked,"
+            " arxiv_id, last_viewed FROM papers ORDER BY uploaded_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -299,6 +335,29 @@ def set_paper_bookmarked(paper_id, value):
         conn.execute(
             "UPDATE papers SET bookmarked = ? WHERE id = ?", (1 if value else 0, paper_id)
         )
+        conn.commit()
+    finally:
+        conn.close()
+    _flush_paper(paper_id)
+
+
+def set_last_viewed(paper_id, ts=None):
+    """Record that the paper was just opened in the viewer."""
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE papers SET last_viewed = ? WHERE id = ?", (ts or now(), paper_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _flush_paper(paper_id)
+
+
+def set_paper_arxiv_id(paper_id, arxiv_id):
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE papers SET arxiv_id = ? WHERE id = ?", (arxiv_id, paper_id))
         conn.commit()
     finally:
         conn.close()
@@ -355,25 +414,29 @@ def upsert_paper_from_sidecar(data, folder_id, digest):
             if _id_is_free(conn, "papers", wanted):
                 cur = conn.execute(
                     "INSERT INTO papers (id, uid, title, filename, stored_name, num_pages,"
-                    " full_text, uploaded_at, folder_id, bookmarked, sidecar_hash)"
-                    " VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)",
+                    " full_text, uploaded_at, folder_id, bookmarked, sidecar_hash,"
+                    " arxiv_id, last_viewed)"
+                    " VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)",
                     (
                         wanted, uid, data.get("title") or "Untitled",
                         data.get("filename") or f"{uid}.pdf", f"{uid}.pdf",
                         data.get("num_pages") or 0, data.get("uploaded_at") or now(),
                         folder_id, 1 if data.get("bookmarked") else 0, digest,
+                        data.get("arxiv_id"), data.get("last_viewed"),
                     ),
                 )
             else:
                 cur = conn.execute(
                     "INSERT INTO papers (uid, title, filename, stored_name, num_pages,"
-                    " full_text, uploaded_at, folder_id, bookmarked, sidecar_hash)"
-                    " VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?)",
+                    " full_text, uploaded_at, folder_id, bookmarked, sidecar_hash,"
+                    " arxiv_id, last_viewed)"
+                    " VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)",
                     (
                         uid, data.get("title") or "Untitled",
                         data.get("filename") or f"{uid}.pdf", f"{uid}.pdf",
                         data.get("num_pages") or 0, data.get("uploaded_at") or now(),
                         folder_id, 1 if data.get("bookmarked") else 0, digest,
+                        data.get("arxiv_id"), data.get("last_viewed"),
                     ),
                 )
             paper_id = cur.lastrowid
@@ -381,13 +444,15 @@ def upsert_paper_from_sidecar(data, folder_id, digest):
             paper_id = row["id"]
             conn.execute(
                 "UPDATE papers SET title = ?, filename = ?, num_pages = ?,"
-                " uploaded_at = ?, folder_id = ?, bookmarked = ?, sidecar_hash = ? WHERE id = ?",
+                " uploaded_at = ?, folder_id = ?, bookmarked = ?, sidecar_hash = ?,"
+                " arxiv_id = ?, last_viewed = ? WHERE id = ?",
                 (
                     data.get("title") or "Untitled",
                     data.get("filename") or f"{uid}.pdf",
                     data.get("num_pages") or 0,
                     data.get("uploaded_at") or now(),
-                    folder_id, 1 if data.get("bookmarked") else 0, digest, paper_id,
+                    folder_id, 1 if data.get("bookmarked") else 0, digest,
+                    data.get("arxiv_id"), data.get("last_viewed"), paper_id,
                 ),
             )
 
@@ -408,11 +473,7 @@ def upsert_paper_from_sidecar(data, folder_id, digest):
             "DELETE FROM messages WHERE scope = 'doc' AND paper_id = ?", (paper_id,)
         )
         for m in data.get("chat") or []:
-            conn.execute(
-                "INSERT INTO messages (scope, paper_id, role, content, created_at)"
-                " VALUES ('doc', ?, ?, ?, ?)",
-                (paper_id, m.get("role") or "user", m.get("content") or "", m.get("created_at") or now()),
-            )
+            _insert_message(conn, "doc", paper_id, m)
         conn.commit()
         return paper_id, is_new
     finally:
@@ -424,11 +485,7 @@ def replace_library_chat(messages):
     try:
         conn.execute("DELETE FROM messages WHERE scope = 'library'")
         for m in messages:
-            conn.execute(
-                "INSERT INTO messages (scope, paper_id, role, content, created_at)"
-                " VALUES ('library', NULL, ?, ?, ?)",
-                (m.get("role") or "user", m.get("content") or "", m.get("created_at") or now()),
-            )
+            _insert_message(conn, "library", None, m)
         conn.commit()
     finally:
         conn.close()
@@ -679,38 +736,186 @@ def delete_highlight(highlight_id):
 
 # -------------------------------------------------------------- messages
 
-def add_message(scope, paper_id, role, content):
+def _insert_message(conn, scope, paper_id, m):
+    """Insert one message dict as stored in a sidecar."""
+    conn.execute(
+        "INSERT INTO messages (scope, paper_id, role, content, created_at, uid, parent_uid, quote)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            scope, paper_id, m.get("role") or "user", m.get("content") or "",
+            m.get("created_at") or now(), m.get("uid") or uuid.uuid4().hex,
+            m.get("parent_uid"), m.get("quote"),
+        ),
+    )
+
+
+def add_message(scope, paper_id, role, content, parent_uid=None, quote=None):
+    """Append a message; returns its uid. parent_uid puts it in the thread
+    hanging off that assistant message instead of the main chat."""
+    uid = uuid.uuid4().hex
     conn = get_conn()
     try:
-        cur = conn.execute(
-            "INSERT INTO messages (scope, paper_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (scope, paper_id, role, content, now()),
+        conn.execute(
+            "INSERT INTO messages (scope, paper_id, role, content, created_at, uid, parent_uid, quote)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (scope, paper_id, role, content, now(), uid, parent_uid, quote),
         )
         conn.commit()
-        message_id = cur.lastrowid
     finally:
         conn.close()
     if scope == "doc":
         _flush_paper(paper_id)
     else:
         _flush_library_chat()
-    return message_id
+    return uid
+
+
+def _message_dict(r):
+    d = {"uid": r["uid"], "role": r["role"], "content": r["content"], "created_at": r["created_at"]}
+    # Only thread replies carry these, so ordinary sidecar entries stay small.
+    if r["parent_uid"]:
+        d["parent_uid"] = r["parent_uid"]
+    if r["quote"]:
+        d["quote"] = r["quote"]
+    return d
+
+
+def _scope_where(scope, paper_id):
+    if scope == "doc":
+        return "scope = 'doc' AND paper_id = ?", (paper_id,)
+    return "scope = 'library'", ()
 
 
 def get_messages(scope, paper_id=None):
+    """Every message in a chat, main chat and threads alike (for sidecars)."""
+    where, args = _scope_where(scope, paper_id)
     conn = get_conn()
     try:
-        if scope == "doc":
-            rows = conn.execute(
-                "SELECT role, content, created_at FROM messages "
-                "WHERE scope = 'doc' AND paper_id = ? ORDER BY id",
-                (paper_id,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT role, content, created_at FROM messages "
-                "WHERE scope = 'library' ORDER BY id"
-            ).fetchall()
-        return [dict(r) for r in rows]
+        rows = conn.execute(
+            f"SELECT * FROM messages WHERE {where} ORDER BY id", args
+        ).fetchall()
+        return [_message_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_main_messages(scope, paper_id=None):
+    """The main chat (no thread replies), each with its thread's reply_count."""
+    where, args = _scope_where(scope, paper_id)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"SELECT m.*, (SELECT COUNT(*) FROM messages t WHERE t.parent_uid = m.uid) AS reply_count"
+            f" FROM messages m WHERE {where.replace('scope', 'm.scope').replace('paper_id', 'm.paper_id')}"
+            " AND m.parent_uid IS NULL ORDER BY m.id",
+            args,
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = _message_dict(r)
+            d["reply_count"] = r["reply_count"]
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def get_thread(scope, paper_id, parent_uid):
+    """(parent, prompt, replies): the assistant message a thread hangs off,
+    the user message that prompted it (or None), and the thread's messages.
+    Returns None if the parent isn't in this chat."""
+    where, args = _scope_where(scope, paper_id)
+    conn = get_conn()
+    try:
+        parent = conn.execute(
+            f"SELECT * FROM messages WHERE {where} AND uid = ? AND parent_uid IS NULL",
+            (*args, parent_uid),
+        ).fetchone()
+        if not parent:
+            return None
+        prompt = conn.execute(
+            f"SELECT * FROM messages WHERE {where} AND parent_uid IS NULL AND id < ?"
+            " ORDER BY id DESC LIMIT 1",
+            (*args, parent["id"]),
+        ).fetchone()
+        replies = conn.execute(
+            f"SELECT * FROM messages WHERE {where} AND parent_uid = ? ORDER BY id",
+            (*args, parent_uid),
+        ).fetchall()
+        return (
+            _message_dict(parent),
+            _message_dict(prompt) if prompt and prompt["role"] == "user" else None,
+            [_message_dict(r) for r in replies],
+        )
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------ discovery caches
+# Both tables live in this cache DB (never synced) and can be wiped freely.
+
+def cache_get(key, max_age=None):
+    """Return the cached JSON value for key, or None if absent/expired."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT value, created_at FROM kv_cache WHERE key = ?", (key,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    if max_age is not None and now() - row["created_at"] > max_age:
+        return None
+    try:
+        return json.loads(row["value"])
+    except Exception:
+        return None
+
+
+def cache_put(key, value):
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_cache (key, value, created_at) VALUES (?, ?, ?)",
+            (key, json.dumps(value), now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def embeddings_get(keys):
+    """key -> raw vector bytes for the keys that are cached."""
+    out = {}
+    if not keys:
+        return out
+    conn = get_conn()
+    try:
+        keys = list(keys)
+        for i in range(0, len(keys), 500):
+            batch = keys[i:i + 500]
+            marks = ",".join("?" * len(batch))
+            for r in conn.execute(
+                f"SELECT key, vec FROM embeddings WHERE key IN ({marks})", batch
+            ).fetchall():
+                out[r["key"]] = r["vec"]
+        return out
+    finally:
+        conn.close()
+
+
+def embeddings_put(items):
+    """items: dict key -> vector bytes."""
+    if not items:
+        return
+    conn = get_conn()
+    try:
+        ts = now()
+        conn.executemany(
+            "INSERT OR REPLACE INTO embeddings (key, vec, created_at) VALUES (?, ?, ?)",
+            [(k, v, ts) for k, v in items.items()],
+        )
+        conn.commit()
     finally:
         conn.close()

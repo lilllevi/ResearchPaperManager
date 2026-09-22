@@ -24,10 +24,16 @@ if (-not (Test-Path ".venv")) {
 
 $venvPy = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 
-# 3. Install / update dependencies
-Write-Host "Installing dependencies (first run may take a minute)..." -ForegroundColor Cyan
-& $venvPy -m pip install --upgrade pip | Out-Null
-& $venvPy -m pip install -r requirements.txt
+# 3. Install / update dependencies — only when requirements.txt has changed
+#    since the last successful install, so everyday launches start quickly.
+$reqHash = (Get-FileHash "requirements.txt" -Algorithm SHA1).Hash
+$stamp = Join-Path $PSScriptRoot ".venv\.requirements-installed"
+if (-not (Test-Path $stamp) -or (Get-Content $stamp -Raw).Trim() -ne $reqHash) {
+    Write-Host "Installing dependencies (first run may take a minute)..." -ForegroundColor Cyan
+    & $venvPy -m pip install --upgrade pip | Out-Null
+    & $venvPy -m pip install -r requirements.txt
+    if ($LASTEXITCODE -eq 0) { Set-Content -Path $stamp -Value $reqHash -Encoding ascii }
+}
 
 # 4. Make sure a .env exists
 if (-not (Test-Path ".env")) {
@@ -50,10 +56,22 @@ if (Test-Path ".env") {
 }
 
 $url = "http://$appHost`:$port"
+
+# Already running (e.g. the launcher was double-clicked twice)? Just open it.
+try {
+    Invoke-WebRequest "$url/api/interests" -UseBasicParsing -TimeoutSec 2 | Out-Null
+    Write-Host "Research Paper Manager is already running at $url - opening it." -ForegroundColor Green
+    Start-Process $url
+    exit 0
+} catch {}
+
 Write-Host ""
 Write-Host "Starting Research Paper Manager at $url" -ForegroundColor Green
-Write-Host "Press Ctrl+C to stop." -ForegroundColor Green
-Start-Process $url
+Write-Host "Keep this window open while you use the app. Close it (or press Ctrl+C) to stop." -ForegroundColor Green
+
+# Open the browser once the server actually answers, not before.
+$opener = "for (`$i = 0; `$i -lt 120; `$i++) { try { Invoke-WebRequest '$url/api/interests' -UseBasicParsing -TimeoutSec 1 | Out-Null; Start-Process '$url'; break } catch { Start-Sleep -Milliseconds 500 } }"
+Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-Command", $opener
 
 # 6. Launch the server (uvicorn serves both the API and the web UI)
 & $venvPy -m uvicorn backend.main:app --host $appHost --port $port

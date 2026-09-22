@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=21" />
+  <link rel="stylesheet" href="styles.css?v=24" />
   <!-- PDF.js from CDN (no build step; needs internet on first load) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <!-- KaTeX for rendering LaTeX math in AI answers (CDN; falls back to raw text if offline) -->
@@ -146,12 +146,20 @@
           <span class="fs-grip" aria-hidden="true">
             <svg viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="1.1"/><circle cx="8" cy="4" r="1.1"/><circle cx="12" cy="4" r="1.1"/><circle cx="4" cy="8" r="1.1"/><circle cx="8" cy="8" r="1.1"/><circle cx="12" cy="8" r="1.1"/><circle cx="4" cy="12" r="1.1"/><circle cx="8" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/></svg>
           </span>
-          <span>Ask about this paper</span>
+          <button type="button" id="fsThreadBack" class="fs-thread-back hidden" title="Back to chat">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Back
+          </button>
+          <span id="fsChatHeadTitle">Ask about this paper</span>
           <button id="fsChatClose" title="Close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
           </button>
         </div>
         <div id="fsChatBody"></div>
+        <div id="fsReplyQuote" class="reply-quote hidden">
+          <span class="rq-label">Replying to</span>
+          <span class="rq-text"></span>
+          <button type="button" class="rq-clear" title="Remove quote">×</button>
+        </div>
         <div id="fsInputResize" class="fs-input-resize" title="Drag to resize the input"></div>
         <div class="fs-chat-input-row">
           <textarea id="fsChatInput" placeholder="Ask a question…" rows="1"></textarea>
@@ -160,6 +168,10 @@
           </button>
         </div>
       </div>
+
+      <!-- "Reply" pill shown when text is selected inside an AI answer (side
+           panel or fullscreen bubble). Inside #viewer so it shows in fullscreen. -->
+      <button type="button" id="chatReplyPill" class="chat-reply-pill hidden">Reply</button>
 
       <!-- Floating toolbar shown when text is selected in the PDF -->
       <div id="selectionToolbar" class="selection-toolbar hidden">
@@ -178,10 +190,56 @@
       <header class="screen-head">
         <div>
           <h2 class="screen-title">Dashboard</h2>
-          <p class="screen-sub">An overview of your library.</p>
+          <p class="screen-sub">Search arXiv, see what's new in your areas, and add papers to your library.</p>
         </div>
       </header>
-      <div class="screen-body" id="dashboardBody"></div>
+      <div class="screen-body" id="dashboardBody">
+        <div id="dashStats" class="stat-row"></div>
+
+        <!-- Semantic search across arXiv -->
+        <section class="disc-section">
+          <div class="disc-head">
+            <div>
+              <h3 class="disc-title">Search arXiv</h3>
+              <p class="disc-sub">Describe what you're looking for in plain language. Recent papers rank higher.</p>
+            </div>
+          </div>
+          <form id="arxivSearchForm" class="disc-search" autocomplete="off">
+            <div class="disc-input-wrap">
+              <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4-4"/></svg>
+              <input type="text" id="arxivSearchInput" placeholder="e.g. neural network decoders for surface-code quantum error correction" />
+            </div>
+            <button type="submit" id="arxivSearchBtn" class="btn-dark">Search</button>
+          </form>
+          <div id="arxivSearchStatus" class="disc-status"></div>
+          <div id="arxivSearchResults" class="arxiv-list"></div>
+        </section>
+
+        <!-- Recommendations from recent uploads/views -->
+        <section class="disc-section">
+          <div class="disc-head">
+            <div>
+              <h3 class="disc-title">Recommended for you</h3>
+              <p class="disc-sub" id="recsBasis">Based on the papers you've recently added and opened.</p>
+            </div>
+            <button type="button" id="recsRefreshBtn" class="btn-ghost" title="Recompute recommendations">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></svg>
+              <span>Refresh</span>
+            </button>
+          </div>
+          <div class="interests">
+            <div class="interests-label">Your interests</div>
+            <div id="interestList" class="interest-list"></div>
+            <form id="interestForm" class="interest-form" autocomplete="off">
+              <input type="text" id="interestInput" maxlength="120"
+                     placeholder="Add an interest, e.g. quantum error correction with LDPC codes" />
+              <button type="submit" class="btn-ghost">Add</button>
+            </form>
+          </div>
+          <div id="recsStatus" class="disc-status"></div>
+          <div id="recsResults" class="arxiv-list"></div>
+        </section>
+      </div>
     </section>
 
     <section id="screenFolders" class="screen hidden">
@@ -213,7 +271,19 @@
 
       <div id="tab-chat" class="tab-content active">
         <div id="chatTitle" class="chat-title">Document chat</div>
+        <div id="threadBar" class="thread-bar hidden">
+          <button type="button" id="threadBack" class="thread-back">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            <span>Back to chat</span>
+          </button>
+          <span class="thread-label">Thread</span>
+        </div>
         <div id="chatMessages"></div>
+        <div id="replyQuote" class="reply-quote hidden">
+          <span class="rq-label">Replying to</span>
+          <span class="rq-text"></span>
+          <button type="button" class="rq-clear" title="Remove quote">×</button>
+        </div>
         <div class="chat-input-row">
           <textarea id="chatInput" placeholder="Ask a question…" rows="2"></textarea>
           <button id="sendBtn" title="Send">
@@ -228,6 +298,7 @@
     </section>
   </div>
 
-  <script src="app.js?v=21"></script>
+
+  <script src="app.js?v=24"></script>
 </body>
 </html>

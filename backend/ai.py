@@ -8,10 +8,17 @@ The default model is gemini-2.5-flash, overridable via RPM_MODEL.
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
 MODEL = os.environ.get("RPM_MODEL", "gemini-flash-latest")
+# Embedding model for arXiv semantic search / recommendations. gemini-embedding-001
+# is the GA text-embedding model (REST: models/<name>:batchEmbedContents).
+EMBED_MODEL = os.environ.get("RPM_EMBED_MODEL", "gemini-embedding-001")
+# Used for the small arXiv query-writing calls when MODEL is overloaded (503).
+FALLBACK_MODEL = os.environ.get("RPM_FALLBACK_MODEL", "gemini-flash-lite-latest")
+EMBED_DIM = 768  # Matryoshka-truncated; smaller cache, near-identical quality
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
@@ -19,12 +26,55 @@ def has_api_key():
     return bool(os.environ.get("GEMINI_API_KEY"))
 
 
-def _complete(system, messages, max_tokens=2000):
-    """messages: list of {"role": "user"|"assistant", "content": str}."""
+class GeminiError(RuntimeError):
+    """An error from the Gemini API. `code` is the HTTP status (None if the
+    API was unreachable); `retry_after` is the server's suggested wait in
+    seconds for 429s, when it gives one."""
+
+    def __init__(self, message, code=None, retry_after=None):
+        super().__init__(message)
+        self.code = code
+        self.retry_after = retry_after
+
+
+def _api_error(code, raw):
+    """Turn an error body into a readable GeminiError."""
+    message, retry = raw.strip()[:300], None
+    try:
+        err = json.loads(raw).get("error", {})
+        message = err.get("message") or message
+        for det in err.get("details") or []:
+            delay = det.get("retryDelay")
+            if delay and delay.endswith("s"):
+                retry = float(delay[:-1])
+    except Exception:
+        pass
+    first = message.split("\n")[0][:240]
+    return GeminiError(f"Gemini API error {code}: {first}", code, retry)
+
+
+def _post(url, body, timeout=180):
+    """POST JSON to the Gemini REST API and return the parsed response."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
-        raise RuntimeError("GEMINI_API_KEY is not set.")
+        raise GeminiError("GEMINI_API_KEY is not set.")
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise _api_error(e.code, e.read().decode("utf-8", "replace"))
+    except urllib.error.URLError as e:
+        raise GeminiError(f"Could not reach Gemini API: {e.reason}")
 
+
+def _complete(system, messages, max_tokens=2000, json_mode=False, model=None):
+    """messages: list of {"role": "user"|"assistant", "content": str}."""
     contents = []
     for m in messages:
         # Gemini uses "user" and "model" as the two roles.
@@ -36,6 +86,8 @@ def _complete(system, messages, max_tokens=2000):
     # the actual answer. (We do NOT send thinkingConfig — Gemini 3.x rejects a
     # zero thinking budget with a 400, and letting the model think is fine here.)
     generation_config = {"maxOutputTokens": max_tokens + 8000}
+    if json_mode:
+        generation_config["responseMimeType"] = "application/json"
 
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
@@ -43,23 +95,8 @@ def _complete(system, messages, max_tokens=2000):
         "generationConfig": generation_config,
     }
 
-    url = f"{API_BASE}/models/{MODEL}:generateContent"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": key},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")
-        # Surface the API's own message (bad key, quota, bad model name, etc.).
-        raise RuntimeError(f"Gemini API error {e.code}: {detail}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Could not reach Gemini API: {e.reason}")
+    # _post surfaces the API's own message (bad key, quota, bad model name...).
+    data = _post(f"{API_BASE}/models/{model or MODEL}:generateContent", body)
 
     candidates = data.get("candidates", [])
     if not candidates:
@@ -118,7 +155,7 @@ def summarize_document(title, full_text):
         "4. Limitations or open questions the authors mention.\n\n"
         f"Paper text:\n{text}"
     )
-    return _complete(system, [{"role": "user", "content": user}])
+    return _complete_resilient(system, [{"role": "user", "content": user}])
 
 
 def generate_prereading(title, full_text):
@@ -142,7 +179,7 @@ def generate_prereading(title, full_text):
         "headings and bullet points, ordered from most to least foundational.\n\n"
         f"Paper text:\n{text}"
     )
-    return _complete(system, [{"role": "user", "content": user}])
+    return _complete_resilient(system, [{"role": "user", "content": user}])
 
 
 def summarize_passage(title, passage):
@@ -154,7 +191,7 @@ def summarize_passage(title, passage):
         f"This passage is from the paper \"{title}\". Summarize and explain it "
         f"in plain language:\n\n\"\"\"\n{passage}\n\"\"\""
     )
-    return _complete(system, [{"role": "user", "content": user}], max_tokens=1200)
+    return _complete_resilient(system, [{"role": "user", "content": user}], max_tokens=1200)
 
 
 # ------------------------------------------------------------- document Q&A
@@ -167,13 +204,18 @@ def answer_about_document(title, question, retrieved_chunks, history, selection=
     context = "\n\n".join(context_blocks) if context_blocks else "(no excerpts found)"
 
     system = (
-        f"You are a research assistant helping a reader understand the paper "
-        f"\"{title}\". Prioritize and ground your answer in the provided "
-        "excerpts, and cite the page like (p. 3) when you use one. If the "
-        "excerpts don't fully cover the question, you may also draw on your own "
-        "reliable knowledge of the field to give a complete, factually correct "
-        "answer — just make clear which parts come from the paper versus general "
-        "background knowledge (e.g. 'The paper doesn't say, but in general…'). "
+        f"You are a knowledgeable tutor helping a reader who is working through "
+        f"the paper \"{title}\". Answer the question the user actually asked, "
+        "on its own terms. If they ask about a general concept, term, method, "
+        "or piece of math, explain that concept generally and thoroughly — the "
+        "way a good textbook or lecturer would — rather than restating what the "
+        "paper says about it or forcing the explanation into the paper's "
+        "framing. Use your own reliable knowledge of the field for this. Then, "
+        "only if it adds something, end with a short separate paragraph "
+        "headed 'In this paper:' that explains how the concept matters or is "
+        "used in this paper, citing pages like (p. 3) from the provided "
+        "excerpts. If the question is specifically about the paper itself (its "
+        "results, methods, claims), answer from the excerpts and cite pages. "
         "Never fabricate claims or citations; if you are unsure, say so."
     )
 
@@ -192,7 +234,7 @@ def answer_about_document(title, question, retrieved_chunks, history, selection=
     user_parts.append(f"\nQuestion: {question}")
     messages.append({"role": "user", "content": "\n\n".join(user_parts)})
 
-    return _complete(system, messages)
+    return _complete_resilient(system, messages)
 
 
 # ---------------------------------------------------------- cross-corpus Q&A
@@ -222,4 +264,146 @@ def answer_across_corpus(question, retrieved_chunks, history):
             "content": f"Excerpts from the library:\n{context}\n\nQuestion: {question}",
         }
     )
-    return _complete(system, messages)
+    return _complete_resilient(system, messages)
+
+
+# ------------------------------------------------------------- embeddings
+
+def embed_texts(texts, task_type="RETRIEVAL_DOCUMENT"):
+    """Embed a list of strings; returns a list of float lists (same order).
+
+    Uses batchEmbedContents (up to 100 texts per request). Callers cache the
+    results, so this is only hit for text it hasn't seen before.
+    """
+    out = []
+    url = f"{API_BASE}/models/{EMBED_MODEL}:batchEmbedContents"
+    for i in range(0, len(texts), 100):
+        batch = texts[i:i + 100]
+        body = {
+            "requests": [
+                {
+                    "model": f"models/{EMBED_MODEL}",
+                    "content": {"parts": [{"text": (t or " ")[:8000]}]},
+                    "taskType": task_type,
+                    "outputDimensionality": EMBED_DIM,
+                }
+                for t in batch
+            ]
+        }
+        data = _post(url, body, timeout=120)
+        embs = data.get("embeddings") or []
+        if len(embs) != len(batch):
+            raise RuntimeError("Gemini returned an unexpected number of embeddings.")
+        out.extend(e.get("values") or [] for e in embs)
+    return out
+
+
+# ------------------------------------------------------ arXiv query writing
+
+_ARXIV_QUERY_RULES = (
+    "You write search queries for the arXiv API (export.arxiv.org/api/query, "
+    "the search_query parameter). Syntax: field prefixes ti: (title), abs: "
+    "(abstract), all: (all fields), cat: (category, e.g. cat:cs.LG, "
+    "cat:quant-ph, cat:cond-mat.str-el); boolean operators AND, OR, ANDNOT in "
+    "UPPERCASE; parentheses for grouping; double quotes for phrases, e.g. "
+    'abs:"graph neural network". Keep each query short (2-5 terms/phrases) so '
+    "it actually returns results: prefer abs: phrases joined with AND, and use "
+    "OR between synonyms. Do not use dates or any other parameters."
+)
+
+
+RETRY_BUDGET_S = 6.0  # how long to keep retrying MODEL before dropping down
+RETRY_FIRST_DELAY_S = 0.5  # backoff doubles each attempt: 0.5, 1, 2, ...
+
+
+def _complete_resilient(system, messages, **kw):
+    """_complete that survives Gemini "high demand" errors.
+
+    On a 500/503 it retries MODEL with a doubling delay; once RETRY_BUDGET_S
+    has passed (or on a 429 quota error, which waiting won't fix) it falls
+    back to the cheaper FALLBACK_MODEL, which gets one short retry of its own.
+    """
+    start = time.monotonic()
+    delay = RETRY_FIRST_DELAY_S
+    while True:
+        try:
+            return _complete(system, messages, **kw)
+        except GeminiError as e:
+            if e.code not in (429, 500, 503):
+                raise
+            last_err = e
+            remaining = RETRY_BUDGET_S - (time.monotonic() - start)
+            if e.code == 429 or remaining <= 0:
+                break
+            time.sleep(min(delay, remaining))
+            delay *= 2
+    if not FALLBACK_MODEL or FALLBACK_MODEL == MODEL:
+        raise last_err
+    try:
+        return _complete(system, messages, model=FALLBACK_MODEL, **kw)
+    except GeminiError as e2:
+        if e2.code not in (500, 503):
+            raise
+        time.sleep(1.0)
+        return _complete(system, messages, model=FALLBACK_MODEL, **kw)
+
+
+def _parse_query_list(raw, limit):
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = data.get("queries") or next(
+            (v for v in data.values() if isinstance(v, list)), []
+        )
+    if not isinstance(data, list):
+        return []
+    out = []
+    for q in data:
+        if isinstance(q, str) and q.strip() and len(q) < 400:
+            out.append(q.strip())
+    return out[:limit]
+
+
+def arxiv_queries_for_search(question, n=3):
+    """Turn a natural-language search into a few arXiv boolean queries."""
+    system = _ARXIV_QUERY_RULES + (
+        " Given a natural-language description of what the user is looking "
+        f"for, return a JSON array of {n} distinct queries, from most specific "
+        "to broadest, that together would retrieve the relevant papers. Reply "
+        "with ONLY the JSON array of strings."
+    )
+    raw = _complete_resilient(system, [{"role": "user", "content": question}], max_tokens=600, json_mode=True)
+    return _parse_query_list(raw, n)
+
+
+def arxiv_queries_for_interests(papers, n=4, interests=None):
+    """papers: list of {"title", "snippet"}, most recent/important first.
+    interests: research interests the user typed in themselves.
+    Returns arXiv queries that would surface new work on the same topics."""
+    sections = []
+    if interests:
+        sections.append(
+            "Research interests the user stated explicitly:\n"
+            + "\n".join(f"- {t}" for t in interests)
+        )
+    if papers:
+        sections.append(
+            "Papers the user has recently been reading (most recent first):\n\n"
+            + "\n\n".join(
+                f"{i + 1}. {p['title']}\n{p.get('snippet', '')[:600]}" for i, p in enumerate(papers)
+            )
+        )
+    listing = "\n\n".join(sections)
+    system = _ARXIV_QUERY_RULES + (
+        " Below are the user's stated research interests and/or the papers "
+        "they have recently been reading. Identify their main research "
+        f"interests and return a JSON array of {n} distinct queries that would "
+        "find related new papers. Every stated interest must be covered by at "
+        "least one query; use any remaining queries for the topics of the "
+        "papers, weighting the most recent ones most. Reply with ONLY the JSON "
+        "array of strings."
+    )
+    raw = _complete_resilient(system, [{"role": "user", "content": listing}], max_tokens=600, json_mode=True)
+    return _parse_query_list(raw, n)

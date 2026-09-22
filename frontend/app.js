@@ -28,7 +28,7 @@ const state = {
   folders: [],
   collapsed: new Set(),   // folder keys the user has collapsed (persisted)
   libraryTab: "all",      // "all" (folder tree) or "recent" (flat, most-recent-first)
-  view: "reader",         // "reader" | "dashboard" | "folders" | "bookmarks"
+  view: "dashboard",      // "reader" | "dashboard" | "folders" | "bookmarks"
   folderCursor: null,     // folder the Folders screen is currently showing (null = top)
   currentPaperId: null,
   currentTitle: "",
@@ -80,8 +80,14 @@ async function init() {
   await loadFolders();
   await loadPapers();
   renderMessages([]);  // show the chat placeholder instead of a blank panel
-  setView("reader");
   wireEvents();
+  setView("dashboard");  // land on the dashboard (arXiv search + recommendations)
+  // Deep link: #search=<query> pre-fills and runs an arXiv search.
+  const m = location.hash.match(/^#search=(.+)$/);
+  if (m) {
+    $("#arxivSearchInput").value = decodeURIComponent(m[1]);
+    runArxivSearch();
+  }
 }
 
 async function loadFolders() {
@@ -583,10 +589,15 @@ async function openPaper(id) {
   $("#fullscreenBtn").disabled = false;
   renderPaperList();
 
+  // Record the view (feeds arXiv recommendations). Fire-and-forget.
+  api(`/api/papers/${id}/view`, { method: "POST" }).catch(() => {});
+  if (meta) meta.last_viewed = Date.now() / 1000;
+
   // Switch chat to this document. Load it now rather than after the PDF: the
   // two are independent, and a slow PDF shouldn't leave a stale chat panel.
   state.chatMode = "doc";
   $("#chatTitle").textContent = state.currentTitle;
+  leaveFsThread();
   loadDocChat();
 
   state.highlights = await api(`/api/papers/${id}/highlights`);
@@ -823,11 +834,21 @@ function onSelection() {
 
   state.pendingSelection = { text: sel.toString().trim(), page: anchorPage, rects };
 
-  // position toolbar just above the selection
-  const last = clientRects[clientRects.length - 1];
-  toolbar.style.left = window.scrollX + last.left + "px";
-  toolbar.style.top = window.scrollY + last.top - 44 + "px";
+  // Position the toolbar just above the selection. It lives inside #viewer
+  // (so it survives fullscreen), which is its positioned ancestor — so use
+  // coordinates relative to the viewer, and keep it inside the viewer's edges
+  // (the viewer clips overflow). Flip below the selection if there's no room.
+  const last = clientRects[clientRects.length - 1] || range.getBoundingClientRect();
+  const viewerRect = $("#viewer").getBoundingClientRect();
   toolbar.classList.remove("hidden");
+  const tw = toolbar.offsetWidth, th = toolbar.offsetHeight, pad = 8;
+  let left = last.left - viewerRect.left;
+  let top = last.top - viewerRect.top - th - 8;
+  if (top < pad) top = last.bottom - viewerRect.top + 8;
+  left = Math.max(pad, Math.min(left, viewerRect.width - tw - pad));
+  top = Math.max(pad, Math.min(top, viewerRect.height - th - pad));
+  toolbar.style.left = left + "px";
+  toolbar.style.top = top + "px";
 }
 
 function findPageOf(node) {
@@ -874,7 +895,7 @@ async function summarizeSelection() {
     );
     return;
   }
-  switchToDocChat();
+  await switchToDocChat();
   appendMessage("user", "Summarize this passage:\n\n" + truncate(s.text, 300));
   const thinking = appendThinking();
   try {
@@ -884,7 +905,7 @@ async function summarizeSelection() {
       body: JSON.stringify({ question: "", selection: s.text }),
     });
     thinking.remove();
-    appendMessage("assistant", res.summary);
+    addReplyControls(appendMessage("assistant", res.summary), res.message_uid, 0);
   } catch (e) {
     thinking.remove();
     appendMessage("assistant", "Error: " + e.message);
@@ -896,21 +917,32 @@ function askAboutSelection() {
   const s = state.pendingSelection;
   if (!s) return;
   // In fullscreen, prefill the bubble popup's input instead of the side panel.
+  let input;
   if (isFullscreen()) {
     openFsChat();
-    const fsInput = $("#fsChatInput");
-    fsInput.value = `About this passage: "${truncate(s.text, 200)}" — `;
-    fsInput.dataset.selection = s.text;
-    fsInput.focus();
-    clearSelection();
-    return;
+    leaveFsThread();
+    input = $("#fsChatInput");
+  } else {
+    switchToDocChat();
+    input = $("#chatInput");
   }
-  switchToDocChat();
-  const input = $("#chatInput");
   input.value = `About this passage: "${truncate(s.text, 200)}" — `;
   input.dataset.selection = s.text;
-  input.focus();
+  // Clear the PDF selection *before* focusing: removeAllRanges() would
+  // otherwise pull the caret back out of the input.
   clearSelection();
+  focusAtEnd(input);
+}
+
+// Focus a text box with the caret after its prefilled text. Deferred so it
+// runs after the mouseup/selection handlers triggered by the toolbar click.
+function focusAtEnd(input) {
+  setTimeout(() => {
+    input.focus();
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
+    input.scrollTop = input.scrollHeight;
+  }, 30);
 }
 
 function clearSelection() {
@@ -920,18 +952,35 @@ function clearSelection() {
 }
 
 // ---------------------------------------------------------------- chat
-function switchToDocChat() {
+// The side panel shows either the main chat, or one *thread*: a separate
+// conversation branching off a single assistant answer (state.thread). Thread
+// replies never appear in the main chat — each answer just shows a quiet
+// "N replies" link — so the main conversation stays uncluttered.
+// Show this paper's main chat. If a thread or the library chat was showing,
+// the document chat is reloaded first; await it before appending messages.
+async function switchToDocChat() {
+  const reload = state.thread || state.chatMode !== "doc";
   state.chatMode = "doc";
   $("#chatTitle").textContent = state.currentTitle;
   setActiveTab("chat");
+  if (reload && state.currentPaperId) await loadDocChat();
+  else resetThreadUi();
+}
+
+function chatBase() {
+  return state.chatMode === "doc"
+    ? `/api/papers/${state.currentPaperId}/chat`
+    : "/api/library/chat";
 }
 
 async function loadDocChat() {
+  resetThreadUi();
   const msgs = await api(`/api/papers/${state.currentPaperId}/chat`);
   renderMessages(msgs);
 }
 
 async function loadLibraryChat() {
+  resetThreadUi();
   state.chatMode = "library";
   $("#chatTitle").textContent = "Chat across all papers";
   setActiveTab("chat");
@@ -955,7 +1004,10 @@ function renderMessages(msgs) {
     box.firstChild.textContent = note;
     return;
   }
-  for (const m of msgs) appendMessage(m.role, m.content, false);
+  for (const m of msgs) {
+    const div = appendMessage(m.role, m.content, false);
+    if (m.role === "assistant") addReplyControls(div, m.uid, m.reply_count || 0);
+  }
   box.scrollTop = box.scrollHeight;
 }
 
@@ -977,6 +1029,34 @@ function appendMessage(role, content, scroll = true) {
   return div;
 }
 
+// Footer on a main-chat answer: "N replies" (when a thread exists) and a
+// Reply button that only appears on hover (always shown on touch screens).
+// `open(quote)` opens the thread — in the side panel by default, or in the
+// fullscreen bubble for answers shown there.
+function addReplyControls(div, uid, replyCount, open = (q) => openThread(uid, q)) {
+  if (!uid) return;
+  div.dataset.uid = uid;
+  const foot = document.createElement("div");
+  foot.className = "msg-foot";
+  if (replyCount > 0) {
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "thread-link";
+    link.textContent = replyCount === 1 ? "1 reply" : `${replyCount} replies`;
+    link.addEventListener("click", () => open(""));
+    foot.appendChild(link);
+  }
+  const reply = document.createElement("button");
+  reply.type = "button";
+  reply.className = "msg-reply";
+  reply.title = "Reply in a thread (or select part of the answer first)";
+  reply.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5A5.5 5.5 0 0 1 20 14.5 5.5 5.5 0 0 1 14.5 20H11"/></svg><span>Reply</span>';
+  reply.addEventListener("click", () => open(selectedTextIn(div)));
+  foot.appendChild(reply);
+  div.appendChild(foot);
+}
+
 function appendThinking() {
   const box = $("#chatMessages");
   const div = document.createElement("div");
@@ -985,6 +1065,170 @@ function appendThinking() {
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
   return div;
+}
+
+// ---- threads
+async function openThread(parentUid, quote = "") {
+  hideReplyPill();
+  const already = state.thread && state.thread.uid === parentUid;
+  state.thread = { uid: parentUid, quote: quote || (already ? state.thread.quote : "") };
+  $("#threadBar").classList.remove("hidden");
+  $("#chatInput").placeholder = "Reply in thread…";
+  setReplyQuote(state.thread.quote);
+  setActiveTab("chat");
+  const box = $("#chatMessages");
+  if (!already) box.innerHTML = '<div class="chat-empty">Loading thread…</div>';
+  try {
+    const t = await api(`${chatBase()}/thread/${parentUid}`);
+    if (!state.thread || state.thread.uid !== parentUid) return;  // navigated away
+    renderThread(t);
+  } catch (e) {
+    box.innerHTML = '<div class="chat-empty"></div>';
+    box.firstChild.textContent = "Couldn't load this thread: " + e.message;
+  }
+  focusAtEnd($("#chatInput"));
+}
+
+// Renders a thread into `box` (side panel by default, or the fullscreen
+// bubble with its own message class and append function).
+function renderThread(t, box = $("#chatMessages"), msgClass = "msg", appendReply = appendThreadMessage) {
+  box.innerHTML = "";
+
+  // The answer being replied to, collapsed to a few lines until expanded.
+  const anchor = document.createElement("div");
+  anchor.className = "thread-anchor";
+  if (t.prompt) {
+    const q = document.createElement("div");
+    q.className = "thread-prompt";
+    q.textContent = "You asked: " + truncate(t.prompt.content.replace(/\s+/g, " "), 140);
+    anchor.appendChild(q);
+  }
+  const body = document.createElement("div");
+  body.className = `${msgClass} assistant md thread-anchor-body collapsed`;
+  body.innerHTML = renderMarkdown(t.parent.content);
+  anchor.appendChild(body);
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "thread-more";
+  more.textContent = "Show full answer";
+  more.addEventListener("click", () => {
+    const collapsed = body.classList.toggle("collapsed");
+    more.textContent = collapsed ? "Show full answer" : "Show less";
+  });
+  anchor.appendChild(more);
+  box.appendChild(anchor);
+  // Only offer "Show full answer" when there is actually more to show.
+  requestAnimationFrame(() => {
+    if (body.scrollHeight <= body.clientHeight + 4) {
+      body.classList.remove("collapsed");
+      more.remove();
+    }
+  });
+
+  const divider = document.createElement("div");
+  divider.className = "thread-divider";
+  divider.textContent = t.messages.length
+    ? `${t.messages.length} ${t.messages.length === 1 ? "reply" : "replies"}`
+    : "Start the thread — ask a follow-up about this answer";
+  box.appendChild(divider);
+
+  for (const m of t.messages) appendReply(m.role, m.content, m.quote, false);
+  box.scrollTop = t.messages.length ? box.scrollHeight : 0;
+}
+
+function appendThreadMessage(role, content, quote, scroll = true) {
+  return addQuote(appendMessage(role, content, scroll), quote);
+}
+
+// Show the quoted part of an answer at the top of a thread reply.
+function addQuote(div, quote) {
+  if (quote) {
+    const q = document.createElement("div");
+    q.className = "msg-quote";
+    q.textContent = truncate(quote.replace(/\s+/g, " "), 220);
+    div.prepend(q);
+  }
+  return div;
+}
+
+// Back to the main chat, scrolled to the answer the thread hangs off.
+async function leaveThread({ reload = true } = {}) {
+  const uid = state.thread && state.thread.uid;
+  resetThreadUi();
+  if (!reload) return;
+  if (state.chatMode === "doc" && state.currentPaperId) await loadDocChat();
+  else if (state.chatMode === "library") await loadLibraryChat();
+  const el = uid && $("#chatMessages").querySelector(`[data-uid="${uid}"]`);
+  if (el) el.scrollIntoView({ block: "center" });
+}
+
+function resetThreadUi() {
+  state.thread = null;
+  hideReplyPill();
+  $("#threadBar").classList.add("hidden");
+  $("#chatInput").placeholder = "Ask a question…";
+  setReplyQuote("");
+}
+
+// The "Replying to: …" strip above the input; × drops the quote.
+function setReplyQuote(text) {
+  if (state.thread) state.thread.quote = text || "";
+  fillQuoteStrip($("#replyQuote"), text);
+}
+
+function fillQuoteStrip(strip, text) {
+  strip.classList.toggle("hidden", !text);
+  strip.querySelector(".rq-text").textContent = text ? truncate(text.replace(/\s+/g, " "), 160) : "";
+}
+
+function selectedTextIn(el) {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !el.contains(sel.anchorNode)) return "";
+  return sel.toString().trim();
+}
+
+// Selecting text inside an AI answer pops a small "Reply" pill next to it:
+// in the main chat it opens that answer's thread quoting the selection; inside
+// a thread it just sets the quote for the next reply. Works in the side panel
+// and in the fullscreen bubble.
+function onChatSelection() {
+  const sel = window.getSelection();
+  const text = sel && !sel.isCollapsed ? sel.toString().trim() : "";
+  const node = text && sel.anchorNode;
+  const el = node && (node.nodeType === 3 ? node.parentElement : node);
+  const msg = el && el.closest && el.closest(
+    "#chatMessages .msg.assistant:not(.thinking), #fsChatBody .fs-msg.assistant:not(.thinking)"
+  );
+  if (!msg || !msg.contains(sel.focusNode)) return hideReplyPill();
+  const inFs = !!msg.closest("#fsChatBody");
+  const inThread = inFs ? !!state.fsThread : !!state.thread;
+  const uid = msg.dataset.uid;
+  if (!inThread && !uid) return hideReplyPill();
+
+  const pill = $("#chatReplyPill");
+  const rects = sel.getRangeAt(0).getClientRects();
+  const last = rects[rects.length - 1];
+  if (!last) return hideReplyPill();
+  pill.style.left = Math.min(last.right + 6, window.innerWidth - 90) + "px";
+  pill.style.top = Math.max(last.top - 34, 8) + "px";
+  pill.classList.remove("hidden");
+  pill.onclick = () => {
+    if (inThread) {
+      if (inFs) setFsReplyQuote(text); else setReplyQuote(text);
+      hideReplyPill();
+      window.getSelection().removeAllRanges();
+      focusAtEnd($(inFs ? "#fsChatInput" : "#chatInput"));
+    } else if (inFs) {
+      openFsThread(uid, text);
+    } else {
+      openThread(uid, text);
+    }
+  };
+}
+
+function hideReplyPill() {
+  const pill = $("#chatReplyPill");
+  if (pill) pill.classList.add("hidden");
 }
 
 async function sendChat() {
@@ -998,28 +1242,35 @@ async function sendChat() {
     return;
   }
 
+  const thread = state.thread;
+  const quote = thread ? thread.quote : "";
   const selection = input.dataset.selection || null;
-  appendMessage("user", question);
+  if (thread) {
+    const divider = $("#chatMessages .thread-divider");
+    if (divider && !$("#chatMessages .msg:not(.thread-anchor-body)")) divider.textContent = "Replies";
+    appendThreadMessage("user", question, quote);
+    setReplyQuote("");
+  } else {
+    appendMessage("user", question);
+  }
   input.value = "";
   delete input.dataset.selection;
   const thinking = appendThinking();
 
+  const body = { question };
+  if (state.chatMode === "doc") body.selection = selection;
+  if (thread) Object.assign(body, { parent_uid: thread.uid, quote: quote || null });
+
   try {
-    let res;
-    if (state.chatMode === "doc") {
-      res = await api(`/api/papers/${state.currentPaperId}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, selection }),
-      });
-    } else {
-      res = await api("/api/library/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
-      });
-    }
+    const res = await api(chatBase(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
     thinking.remove();
+    // Left the thread (or entered another) while waiting: it's saved, and
+    // shows up next time that thread is opened.
+    if (state.thread !== thread) return;
     const msg = appendMessage("assistant", res.answer);
     if (res.sources && res.sources.length) {
       const src = document.createElement("div");
@@ -1033,8 +1284,10 @@ async function sendChat() {
       }
       msg.appendChild(src);
     }
+    if (!thread) addReplyControls(msg, res.message_uid, 0);
   } catch (e) {
     thinking.remove();
+    if (state.thread !== thread) return;
     appendMessage("assistant", "Error: " + e.message);
   }
 }
@@ -1050,13 +1303,13 @@ async function docAiAction(userLabel, path, pick) {
     fsRun(userLabel, endpoint, {}, pick);
     return;
   }
-  switchToDocChat();
+  await switchToDocChat();
   appendMessage("user", userLabel);
   const thinking = appendThinking();
   try {
     const res = await api(endpoint, { method: "POST" });
     thinking.remove();
-    appendMessage("assistant", pick(res));
+    addReplyControls(appendMessage("assistant", pick(res)), res.message_uid, 0);
   } catch (e) {
     thinking.remove();
     appendMessage("assistant", "Error: " + e.message);
@@ -1326,7 +1579,11 @@ function onFullscreenChange() {
   const btn = $("#fullscreenBtn");
   btn.classList.toggle("is-fullscreen", fs); // CSS swaps the expand/compress icon
   btn.title = fs ? "Exit full screen" : "Read full screen";
-  if (!fs) $("#fsChatPopup").classList.add("hidden");
+  if (!fs) {
+    $("#fsChatPopup").classList.add("hidden");
+    hideReplyPill();
+    if (state.chatMode === "doc" && state.currentPaperId && !state.thread) loadDocChat();
+  }
 }
 
 function openFsChat() {
@@ -1572,10 +1829,20 @@ function makeFsInputResizable() {
 }
 
 // Run a doc-scoped AI request and render the Q/A as bubbles in the popup.
+// With body.parent_uid it's a reply in the bubble's open thread; anything
+// else (summaries, new questions) goes to the main conversation.
 async function fsRun(userText, endpoint, body, pick) {
   if (!state.currentPaperId || !requireAi()) return;
   openFsChat();
-  appendFsMessage("user", userText);
+  if (state.fsThread && !body.parent_uid) leaveFsThread();
+  const thread = state.fsThread;
+  if (thread) {
+    const divider = $("#fsChatBody .thread-divider");
+    if (divider && !thread.count) divider.textContent = "Replies";
+    addQuote(appendFsMessage("user", userText), body.quote);
+  } else {
+    appendFsMessage("user", userText);
+  }
   const thinking = appendFsMessage("assistant thinking", "Thinking…");
   try {
     const res = await api(endpoint, {
@@ -1584,9 +1851,13 @@ async function fsRun(userText, endpoint, body, pick) {
       body: JSON.stringify(body),
     });
     thinking.remove();
-    appendFsMessage("assistant", pick(res));
+    if (state.fsThread !== thread) return;  // left/entered a thread meanwhile; it's saved
+    const div = appendFsMessage("assistant", pick(res));
+    if (thread) thread.count += 2;
+    else addReplyControls(div, res.message_uid, 0, (q) => openFsThread(res.message_uid, q));
   } catch (e) {
     thinking.remove();
+    if (state.fsThread !== thread) return;
     appendFsMessage("assistant", "Error: " + e.message);
   }
 }
@@ -1598,12 +1869,71 @@ function sendFsChat() {
   const selection = input.dataset.selection || null;
   input.value = "";
   delete input.dataset.selection;
-  fsRun(
-    question,
-    `/api/papers/${state.currentPaperId}/chat`,
-    { question, selection },
-    (res) => res.answer
-  );
+  const body = { question, selection };
+  if (state.fsThread) {
+    Object.assign(body, { parent_uid: state.fsThread.uid, quote: state.fsThread.quote || null });
+    setFsReplyQuote("");
+  }
+  fsRun(question, `/api/papers/${state.currentPaperId}/chat`, body, (res) => res.answer);
+}
+
+// The bubble shows one thread at a time in place of its conversation; the
+// conversation's nodes are set aside (state.fsMainNodes) and put back on Back.
+async function openFsThread(parentUid, quote = "") {
+  hideReplyPill();
+  openFsChat();
+  const box = $("#fsChatBody");
+  const already = state.fsThread && state.fsThread.uid === parentUid;
+  if (!state.fsThread) state.fsMainNodes = [...box.childNodes];
+  state.fsThread = {
+    uid: parentUid,
+    quote: quote || (already ? state.fsThread.quote : ""),
+    count: already ? state.fsThread.count : 0,
+  };
+  $("#fsThreadBack").classList.remove("hidden");
+  $("#fsChatHeadTitle").textContent = "Thread";
+  $("#fsChatInput").placeholder = "Reply in thread…";
+  setFsReplyQuote(state.fsThread.quote);
+  if (!already) box.innerHTML = '<div class="fs-chat-empty">Loading thread…</div>';
+  try {
+    const t = await api(`/api/papers/${state.currentPaperId}/chat/thread/${parentUid}`);
+    if (!state.fsThread || state.fsThread.uid !== parentUid) return;
+    state.fsThread.count = t.messages.length;
+    renderThread(t, box, "fs-msg", (role, content, q, scroll) =>
+      addQuote(appendFsMessage(role, content), q));
+  } catch (e) {
+    box.innerHTML = '<div class="fs-chat-empty"></div>';
+    box.firstChild.textContent = "Couldn't load this thread: " + e.message;
+  }
+  focusAtEnd($("#fsChatInput"));
+}
+
+function leaveFsThread() {
+  const t = state.fsThread;
+  if (!t) return;
+  state.fsThread = null;
+  hideReplyPill();
+  const box = $("#fsChatBody");
+  box.replaceChildren(...(state.fsMainNodes || []));
+  state.fsMainNodes = null;
+  $("#fsThreadBack").classList.add("hidden");
+  $("#fsChatHeadTitle").textContent = "Ask about this paper";
+  $("#fsChatInput").placeholder = "Ask a question…";
+  setFsReplyQuote("");
+  ensureFsPlaceholder();
+  // Refresh the answer's "N replies" link and bring it back into view.
+  const parent = box.querySelector(`[data-uid="${t.uid}"]`);
+  if (parent) {
+    const foot = parent.querySelector(":scope > .msg-foot");
+    if (foot) foot.remove();
+    addReplyControls(parent, t.uid, t.count, (q) => openFsThread(t.uid, q));
+    parent.scrollIntoView({ block: "center" });
+  }
+}
+
+function setFsReplyQuote(text) {
+  if (state.fsThread) state.fsThread.quote = text || "";
+  fillQuoteStrip($("#fsReplyQuote"), text);
 }
 
 // ----------------------------------------------------------------- tabs
@@ -1834,20 +2164,27 @@ function renderBookmarksScreen() {
 }
 
 // ----------------------------------------------------------- Dashboard
-// Deliberately a placeholder - the real widgets aren't designed yet. It
-// shows counts already in memory so the screen isn't a blank box.
+// Library counts, semantic arXiv search and recommendations. The markup is
+// static in index.html so a re-render (e.g. after an upload) never wipes the
+// search box; only the stats and the two result lists are rebuilt.
 function renderDashboard() {
-  const body = $("#dashboardBody");
-  body.innerHTML = "";
+  renderDashStats();
+  renderArxivList("search");
+  renderArxivList("recs");
+  if (!discover.interestsLoaded) loadInterests();
+  // Recommendations load lazily the first time the dashboard is shown.
+  if (!discover.recs.data && !discover.recs.loading && !discover.recs.error) loadRecommendations(false);
+}
 
+function renderDashStats() {
+  const row = $("#dashStats");
+  row.innerHTML = "";
   const stats = [
     ["Papers", state.papers.length],
     ["Folders", state.folders.length],
     ["Bookmarked", state.papers.filter((p) => p.bookmarked).length],
     ["Pages", state.papers.reduce((n, p) => n + (p.num_pages || 0), 0)],
   ];
-  const row = document.createElement("div");
-  row.className = "stat-row";
   for (const pair of stats) {
     const cell = document.createElement("div");
     cell.className = "stat";
@@ -1856,17 +2193,338 @@ function renderDashboard() {
     cell.querySelector(".stat-value").textContent = pair[1];
     row.appendChild(cell);
   }
-  body.appendChild(row);
+}
 
-  const soon = document.createElement("div");
-  soon.className = "soon";
-  const head = document.createElement("strong");
-  head.textContent = "Dashboard coming soon";
-  soon.appendChild(head);
-  soon.appendChild(document.createTextNode(
-    "Reading activity, recently opened papers and highlight trends will live here."
-  ));
-  body.appendChild(soon);
+// -------------------------------------------------------- arXiv discovery
+const discover = {
+  search: { loading: false, error: null, data: null, query: "" },
+  recs:   { loading: false, error: null, data: null },
+  adding: new Set(),     // arxiv ids currently being downloaded/ingested
+  cardErrors: {},        // arxiv id -> last add error
+  expanded: new Set(),   // arxiv ids whose abstract is expanded
+  interests: [],         // typed-in interests (saved in storage/interests.json)
+  interestsLoaded: false,
+};
+
+const DISCOVER_HOSTS = {
+  search: { status: "#arxivSearchStatus", list: "#arxivSearchResults" },
+  recs:   { status: "#recsStatus",        list: "#recsResults" },
+};
+
+async function runArxivSearch(e) {
+  if (e) e.preventDefault();
+  const q = $("#arxivSearchInput").value.trim();
+  if (!q || discover.search.loading) return;
+  Object.assign(discover.search, { loading: true, error: null, query: q });
+  $("#arxivSearchBtn").disabled = true;
+  renderArxivList("search");
+  try {
+    discover.search.data = await api("/api/arxiv/search?q=" + encodeURIComponent(q));
+  } catch (err) {
+    discover.search.error = err.message || String(err);
+  } finally {
+    discover.search.loading = false;
+    $("#arxivSearchBtn").disabled = false;
+    renderArxivList("search");
+  }
+}
+
+async function loadRecommendations(refresh) {
+  if (discover.recs.loading) return;
+  Object.assign(discover.recs, { loading: true, error: null });
+  $("#recsRefreshBtn").disabled = true;
+  renderArxivList("recs");
+  try {
+    discover.recs.data = await api("/api/arxiv/recommendations" + (refresh ? "?refresh=true" : ""));
+  } catch (err) {
+    discover.recs.error = err.message || String(err);
+  } finally {
+    discover.recs.loading = false;
+    $("#recsRefreshBtn").disabled = false;
+    renderArxivList("recs");
+  }
+}
+
+// ---- typed-in interests (steer recommendations alongside recent reading)
+async function loadInterests() {
+  discover.interestsLoaded = true;
+  try {
+    discover.interests = (await api("/api/interests")).interests || [];
+  } catch (err) {
+    discover.interestsLoaded = false;  // try again next time the dashboard shows
+  }
+  renderInterests();
+}
+
+async function saveInterests(next) {
+  const prev = discover.interests;
+  discover.interests = next;
+  renderInterests();
+  try {
+    const res = await api("/api/interests", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ interests: next }),
+    });
+    discover.interests = res.interests;
+    renderInterests();
+    loadRecommendations(false);  // new interest set → recomputed (or cached) list
+  } catch (err) {
+    discover.interests = prev;
+    renderInterests();
+    alert("Couldn't save interests: " + (err.message || err));
+  }
+}
+
+function addInterest(e) {
+  e.preventDefault();
+  const input = $("#interestInput");
+  const text = input.value.trim().replace(/\s+/g, " ");
+  if (!text) return;
+  input.value = "";
+  if (discover.interests.some((i) => i.toLowerCase() === text.toLowerCase())) return;
+  saveInterests([...discover.interests, text]);
+}
+
+function renderInterests() {
+  const list = $("#interestList");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!discover.interests.length) {
+    list.innerHTML = '<span class="interest-empty">None yet — add topics you care about and they’ll shape your recommendations.</span>';
+    return;
+  }
+  for (const text of discover.interests) {
+    const chip = document.createElement("span");
+    chip.className = "interest-chip";
+    const label = document.createElement("span");
+    label.textContent = text;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.title = "Remove";
+    del.textContent = "×";
+    del.addEventListener("click", () => saveInterests(discover.interests.filter((i) => i !== text)));
+    chip.append(label, del);
+    list.appendChild(chip);
+  }
+}
+
+// Which library paper (if any) an arXiv result corresponds to. Checked
+// against the live library so adds/deletes elsewhere are reflected at once.
+function normTitle(t) { return (t || "").toLowerCase().replace(/[^a-z0-9]+/g, ""); }
+function libraryPaperFor(item) {
+  const nt = normTitle(item.title);
+  const hit = state.papers.find((p) =>
+    (p.arxiv_id && p.arxiv_id === item.arxiv_id) || (nt && normTitle(p.title) === nt));
+  if (hit) return hit.id;
+  // The server also matches the arXiv stamp inside hand-uploaded PDFs.
+  if (item.paper_id && state.papers.some((p) => p.id === item.paper_id)) return item.paper_id;
+  return null;
+}
+
+function statusHtml(kind) {
+  const s = discover[kind];
+  if (s.loading) {
+    const msg = kind === "search"
+      ? "Searching arXiv and ranking by meaning… (arXiv is rate-limited, so this can take 15–30 s)"
+      : "Finding papers related to your interests and recent reading… (this can take up to a minute the first time)";
+    return '<div class="disc-loading"><span class="disc-spinner"></span><span>' + msg + "</span></div>";
+  }
+  if (s.error) return '<div class="disc-error"></div>';
+  return "";
+}
+
+function renderArxivList(kind) {
+  const hosts = DISCOVER_HOSTS[kind];
+  const statusEl = $(hosts.status);
+  const listEl = $(hosts.list);
+  if (!statusEl || !listEl) return;
+  const s = discover[kind];
+
+  statusEl.innerHTML = statusHtml(kind);
+  if (s.error && !s.loading) {
+    statusEl.querySelector(".disc-error").textContent =
+      (kind === "search" ? "Search failed: " : "Couldn't load recommendations: ") + s.error;
+  }
+
+  if (kind === "recs") {
+    const basis = $("#recsBasis");
+    const prof = (s.data && s.data.profile) || [];
+    const ints = (s.data && s.data.interests) || [];
+    const parts = [];
+    if (ints.length) parts.push(ints.length === 1 ? "your interest" : `your ${ints.length} interests`);
+    if (prof.length) {
+      parts.push(prof.slice(0, 3).map((p) => "“" + truncate(p.title, 60) + "”").join(", ") +
+        (prof.length > 3 ? ` and ${prof.length - 3} more` : ""));
+    }
+    basis.textContent = parts.length
+      ? "Based on " + parts.join(" and ") + "."
+      : "Based on your interests and the papers you've recently added and opened.";
+  }
+
+  listEl.innerHTML = "";
+  if (!s.data || s.loading) return;
+
+  // Meta line: ranking mode + any notices (fallbacks, partial failures).
+  const meta = document.createElement("div");
+  meta.className = "disc-meta";
+  const mode = s.data.mode;
+  if (mode === "semantic" || mode === "keyword") {
+    const badge = document.createElement("span");
+    badge.className = "chip" + (mode === "semantic" ? " chip-lilac" : "");
+    badge.textContent = mode === "semantic" ? "Ranked by meaning + recency" : "Keyword match + recency";
+    meta.appendChild(badge);
+  }
+  if (kind === "recs" && s.data.computed_at) {
+    const when = document.createElement("span");
+    when.textContent = "Updated " + relativeAge(new Date(s.data.computed_at * 1000)) + (s.data.cached ? " (cached)" : "");
+    meta.appendChild(when);
+  }
+  for (const n of s.data.notices || []) {
+    const note = document.createElement("span");
+    note.className = "disc-notice";
+    note.textContent = n;
+    meta.appendChild(note);
+  }
+  if (meta.childNodes.length) listEl.appendChild(meta);
+
+  const items = s.data.items || [];
+  if (!items.length) {
+    if (!(s.data.notices || []).length) {
+      listEl.appendChild(emptyNote(kind === "search" ? "No matching papers found on arXiv." : "No recommendations yet."));
+    }
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "arxiv-grid";
+  items.forEach((item) => grid.appendChild(arxivCard(item)));
+  listEl.appendChild(grid);
+}
+
+function formatArxivDate(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function relativeAge(d) {
+  const days = Math.max(0, (Date.now() - d.getTime()) / 86400000);
+  if (days < 1) {
+    const hours = Math.round(days * 24);
+    return hours <= 1 ? "just now" : hours + " h ago";
+  }
+  if (days < 14) return Math.round(days) + (Math.round(days) === 1 ? " day ago" : " days ago");
+  if (days < 60) return Math.round(days / 7) + " wk ago";
+  if (days < 730) return Math.round(days / 30.4) + " mo ago";
+  return Math.round(days / 365) + " yr ago";
+}
+
+function arxivCard(item) {
+  const card = document.createElement("article");
+  card.className = "arxiv-card";
+  const pub = new Date(item.published);
+  const ageDays = (Date.now() - pub.getTime()) / 86400000;
+
+  card.innerHTML =
+    '<div class="ax-top">' +
+      '<span class="chip chip-date"></span>' +
+      (ageDays < 30 ? '<span class="chip chip-new">New</span>' : "") +
+      (item.primary_category ? '<span class="chip chip-cat"></span>' : "") +
+      '<a class="ax-id" target="_blank" rel="noopener"></a>' +
+    "</div>" +
+    '<a class="ax-title" target="_blank" rel="noopener"></a>' +
+    '<div class="ax-authors"></div>' +
+    '<p class="ax-abstract" title="Click to expand"></p>' +
+    '<div class="ax-actions"></div>' +
+    '<div class="ax-error"></div>';
+
+  card.querySelector(".chip-date").textContent =
+    formatArxivDate(item.published) + " · " + relativeAge(pub);
+  card.querySelector(".chip-date").title = "Submitted to arXiv";
+  if (item.primary_category) card.querySelector(".chip-cat").textContent = item.primary_category;
+  const idLink = card.querySelector(".ax-id");
+  idLink.href = item.abs_url;
+  idLink.textContent = "arXiv:" + item.arxiv_id;
+  const title = card.querySelector(".ax-title");
+  title.href = item.abs_url;
+  title.textContent = item.title;
+
+  const authors = item.authors || [];
+  card.querySelector(".ax-authors").textContent =
+    authors.slice(0, 4).join(", ") + (authors.length > 4 ? ` et al. (${authors.length})` : "");
+
+  const abs = card.querySelector(".ax-abstract");
+  abs.textContent = item.summary;
+  abs.classList.toggle("expanded", discover.expanded.has(item.arxiv_id));
+  abs.onclick = () => {
+    if (discover.expanded.has(item.arxiv_id)) discover.expanded.delete(item.arxiv_id);
+    else discover.expanded.add(item.arxiv_id);
+    abs.classList.toggle("expanded");
+  };
+
+  const actions = card.querySelector(".ax-actions");
+  const pid = libraryPaperFor(item);
+  if (pid) {
+    const tag = document.createElement("span");
+    tag.className = "ax-inlib";
+    tag.textContent = "In library";
+    const open = axButton("Open", "btn-dark", () => openPaperFromScreen(pid));
+    actions.append(tag, open);
+  } else if (discover.adding.has(item.arxiv_id)) {
+    const busy = document.createElement("span");
+    busy.className = "disc-loading small";
+    busy.innerHTML = '<span class="disc-spinner"></span><span>Downloading &amp; indexing…</span>';
+    actions.appendChild(busy);
+  } else {
+    actions.append(
+      axButton("Add & open", "btn-dark", () => addArxivPaper(item, true)),
+      axButton("Add to library", "btn-ghost", () => addArxivPaper(item, false))
+    );
+  }
+  const pdf = document.createElement("a");
+  pdf.className = "ax-link";
+  pdf.href = item.pdf_url || item.abs_url;
+  pdf.target = "_blank";
+  pdf.rel = "noopener";
+  pdf.textContent = "PDF ↗";
+  actions.appendChild(pdf);
+
+  const err = discover.cardErrors[item.arxiv_id];
+  if (err) card.querySelector(".ax-error").textContent = err;
+  return card;
+}
+
+function axButton(label, cls, onClick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = cls;
+  b.textContent = label;
+  b.onclick = onClick;
+  return b;
+}
+
+async function addArxivPaper(item, openAfter) {
+  if (discover.adding.has(item.arxiv_id)) return;
+  discover.adding.add(item.arxiv_id);
+  delete discover.cardErrors[item.arxiv_id];
+  renderArxivList("search");
+  renderArxivList("recs");
+  try {
+    const res = await api("/api/arxiv/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ arxiv_id: item.arxiv_id, title: item.title }),
+    });
+    item.paper_id = res.id;
+    discover.adding.delete(item.arxiv_id);
+    await loadPapers();   // re-renders the dashboard with "In library"
+    if (openAfter) openPaperFromScreen(res.id);
+  } catch (err) {
+    discover.adding.delete(item.arxiv_id);
+    discover.cardErrors[item.arxiv_id] = "Couldn't add: " + (err.message || err);
+    renderArxivList("search");
+    renderArxivList("recs");
+  }
 }
 
 // -------------------------------------------------------- bookmarking
@@ -1899,6 +2557,9 @@ function wireEvents() {
     e.target.value = "";
   });
   $("#librarySearch").addEventListener("input", renderPaperList);
+  $("#arxivSearchForm").addEventListener("submit", runArxivSearch);
+  $("#recsRefreshBtn").addEventListener("click", () => loadRecommendations(true));
+  $("#interestForm").addEventListener("submit", addInterest);
   $("#libraryChatBtn").addEventListener("click", loadLibraryChat);
   $("#newFolderBtn").addEventListener("click", newFolder);
 
@@ -1963,6 +2624,17 @@ function wireEvents() {
   });
 
   $("#sendBtn").addEventListener("click", sendChat);
+  $("#threadBack").addEventListener("click", () => leaveThread());
+  $("#replyQuote .rq-clear").addEventListener("click", () => setReplyQuote(""));
+  $("#chatMessages").addEventListener("mouseup", () => setTimeout(onChatSelection, 10));
+  $("#fsChatBody").addEventListener("mouseup", () => setTimeout(onChatSelection, 10));
+  $("#fsChatBody").addEventListener("scroll", hideReplyPill);
+  $("#fsThreadBack").addEventListener("click", leaveFsThread);
+  $("#fsReplyQuote .rq-clear").addEventListener("click", () => setFsReplyQuote(""));
+  $("#chatMessages").addEventListener("scroll", hideReplyPill);
+  document.addEventListener("mousedown", (e) => {
+    if (!e.target.closest("#chatReplyPill")) hideReplyPill();
+  });
   $("#chatInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();

@@ -13,6 +13,7 @@ files that sync safely:
     storage/papers/<uid>.json     metadata, highlights, chat   small, mergeable
     storage/folders/<uid>.json    one folder         tiny, mergeable
     storage/library-chat.json     cross-corpus chat  append-mostly
+    storage/interests.json        typed-in research interests (recommendations)
     cache/papers.db               derived — NOT in storage/, never synced
 
 Everything that changes is small, per-entity, and text. Two machines editing
@@ -40,6 +41,7 @@ STORAGE_DIR = db.STORAGE_DIR
 PAPERS_DIR = STORAGE_DIR / "papers"
 FOLDERS_DIR = STORAGE_DIR / "folders"
 LIBRARY_CHAT_PATH = STORAGE_DIR / "library-chat.json"
+INTERESTS_PATH = STORAGE_DIR / "interests.json"
 
 # Page boundaries inside the .txt sidecar. Form feed is the conventional page
 # break and is stripped from extracted text so it can't appear in the content.
@@ -152,6 +154,8 @@ def write_paper(paper_id):
         "uploaded_at": paper["uploaded_at"],
         "folder_uid": folder_uid,
         "bookmarked": bool(paper.get("bookmarked")),
+        "arxiv_id": paper.get("arxiv_id"),
+        "last_viewed": paper.get("last_viewed"),
         "highlights": highlights,
         "chat": db.get_messages("doc", paper_id),
     }
@@ -180,6 +184,19 @@ def write_folder(folder_id):
 
 def write_library_chat():
     _write_atomic(LIBRARY_CHAT_PATH, _dump({"chat": db.get_messages("library")}))
+
+
+# ------------------------------------------------------------- interests
+# Stored only here (not in the DB): it's one tiny list, read on demand.
+
+def read_interests():
+    data, _ = _read_json(INTERESTS_PATH)
+    items = data.get("interests") if isinstance(data, dict) else None
+    return [i for i in items if isinstance(i, str) and i.strip()] if isinstance(items, list) else []
+
+
+def write_interests(items):
+    _write_atomic(INTERESTS_PATH, _dump({"interests": list(items)}))
 
 
 def delete_paper_files(uid, remove_pdf=True):
