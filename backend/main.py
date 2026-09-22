@@ -78,9 +78,10 @@ class HighlightRequest(BaseModel):
 
 
 class PaperUpdate(BaseModel):
-    # Both optional; we use model_fields_set to tell "omitted" from "set to null".
+    # All optional; we use model_fields_set to tell "omitted" from "set to null".
     title: str | None = None
     folder_id: int | None = None
+    bookmarked: bool | None = None
 
 
 class FolderCreate(BaseModel):
@@ -206,6 +207,8 @@ def update_paper(paper_id: int, req: PaperUpdate):
         if req.folder_id is not None and not db.get_folder(req.folder_id):
             raise HTTPException(404, "Folder not found.")
         db.set_paper_folder(paper_id, req.folder_id)
+    if "bookmarked" in fields:
+        db.set_paper_bookmarked(paper_id, bool(req.bookmarked))
     return {"ok": True}
 
 

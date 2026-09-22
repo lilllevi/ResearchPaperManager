@@ -180,6 +180,10 @@ def init_db() -> None:
         hcols = [r["name"] for r in conn.execute("PRAGMA table_info(highlights)").fetchall()]
         if "uid" not in hcols:
             conn.execute("ALTER TABLE highlights ADD COLUMN uid TEXT")
+        # Migration: bookmarked papers (the Bookmarks screen). Stored in the
+        # sidecar too, so a bookmark set on one machine follows you to the other.
+        if "bookmarked" not in cols:
+            conn.execute("ALTER TABLE papers ADD COLUMN bookmarked INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_papers_uid ON papers(uid)")
@@ -259,7 +263,7 @@ def list_papers():
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, title, filename, num_pages, uploaded_at, folder_id "
+            "SELECT id, title, filename, num_pages, uploaded_at, folder_id, bookmarked "
             "FROM papers ORDER BY uploaded_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
@@ -282,6 +286,18 @@ def set_paper_folder(paper_id, folder_id):
     try:
         conn.execute(
             "UPDATE papers SET folder_id = ? WHERE id = ?", (folder_id, paper_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _flush_paper(paper_id)
+
+
+def set_paper_bookmarked(paper_id, value):
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE papers SET bookmarked = ? WHERE id = ?", (1 if value else 0, paper_id)
         )
         conn.commit()
     finally:
@@ -339,25 +355,25 @@ def upsert_paper_from_sidecar(data, folder_id, digest):
             if _id_is_free(conn, "papers", wanted):
                 cur = conn.execute(
                     "INSERT INTO papers (id, uid, title, filename, stored_name, num_pages,"
-                    " full_text, uploaded_at, folder_id, sidecar_hash)"
-                    " VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)",
+                    " full_text, uploaded_at, folder_id, bookmarked, sidecar_hash)"
+                    " VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)",
                     (
                         wanted, uid, data.get("title") or "Untitled",
                         data.get("filename") or f"{uid}.pdf", f"{uid}.pdf",
                         data.get("num_pages") or 0, data.get("uploaded_at") or now(),
-                        folder_id, digest,
+                        folder_id, 1 if data.get("bookmarked") else 0, digest,
                     ),
                 )
             else:
                 cur = conn.execute(
                     "INSERT INTO papers (uid, title, filename, stored_name, num_pages,"
-                    " full_text, uploaded_at, folder_id, sidecar_hash)"
-                    " VALUES (?, ?, ?, ?, ?, '', ?, ?, ?)",
+                    " full_text, uploaded_at, folder_id, bookmarked, sidecar_hash)"
+                    " VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?)",
                     (
                         uid, data.get("title") or "Untitled",
                         data.get("filename") or f"{uid}.pdf", f"{uid}.pdf",
                         data.get("num_pages") or 0, data.get("uploaded_at") or now(),
-                        folder_id, digest,
+                        folder_id, 1 if data.get("bookmarked") else 0, digest,
                     ),
                 )
             paper_id = cur.lastrowid
@@ -365,13 +381,13 @@ def upsert_paper_from_sidecar(data, folder_id, digest):
             paper_id = row["id"]
             conn.execute(
                 "UPDATE papers SET title = ?, filename = ?, num_pages = ?,"
-                " uploaded_at = ?, folder_id = ?, sidecar_hash = ? WHERE id = ?",
+                " uploaded_at = ?, folder_id = ?, bookmarked = ?, sidecar_hash = ? WHERE id = ?",
                 (
                     data.get("title") or "Untitled",
                     data.get("filename") or f"{uid}.pdf",
                     data.get("num_pages") or 0,
                     data.get("uploaded_at") or now(),
-                    folder_id, digest, paper_id,
+                    folder_id, 1 if data.get("bookmarked") else 0, digest, paper_id,
                 ),
             )
 

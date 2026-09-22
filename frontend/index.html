@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20" />
+  <link rel="stylesheet" href="styles.css?v=21" />
   <!-- PDF.js from CDN (no build step; needs internet on first load) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <!-- KaTeX for rendering LaTeX math in AI answers (CDN; falls back to raw text if offline) -->
@@ -18,21 +18,21 @@
   <div id="app">
     <!-- Thin icon rail -->
     <nav class="icon-rail">
-      <div class="rail-logo" title="Research Paper Manager">
+      <button id="railHomeBtn" class="rail-logo" type="button" data-view="reader" title="Research Paper Manager">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5c0-1 .8-1.5 1.8-1.2C7.6 4.8 9.4 5.6 12 7c2.6-1.4 4.4-2.2 6.2-2.7 1-.3 1.8.2 1.8 1.2v12c0 1-.8 1.5-1.8 1.2-1.8-.5-3.6-1.3-6.2-2.7-2.6 1.4-4.4 2.2-6.2 2.7C4.8 19 4 18.5 4 17.5v-12Z"/><path d="M12 7v11"/></svg>
-      </div>
+      </button>
 
       <div class="rail-nav">
-        <button class="rail-btn active" type="button" title="Library">
+        <button id="railDashboardBtn" class="rail-btn" type="button" data-view="dashboard" title="Dashboard">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
         </button>
-        <button class="rail-btn" type="button" title="Folders">
+        <button id="railFoldersBtn" class="rail-btn" type="button" data-view="folders" title="Papers by folder">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.7c0-.9.7-1.6 1.6-1.6h4l1.7 2h7.1c.9 0 1.6.7 1.6 1.6v8.6c0 .9-.7 1.6-1.6 1.6H5.1c-.9 0-1.6-.7-1.6-1.6V6.7Z"/></svg>
         </button>
-        <button id="railReaderBtn" class="rail-btn" type="button" title="Full-screen read">
+        <button id="railReaderBtn" class="rail-btn active" type="button" data-view="reader" title="Reader">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2c-1.8-1-4-1.4-6.2-1V18c2.2-.4 4.4 0 6.2 1 1.8-1 4-1.4 6.2-1V5.2c-2.2-.4-4.4 0-6.2 1Z"/><path d="M12 6.2V19.2"/></svg>
         </button>
-        <button id="railHighlightsBtn" class="rail-btn" type="button" title="Highlights">
+        <button id="railBookmarksBtn" class="rail-btn" type="button" data-view="bookmarks" title="Bookmarks">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-4-6.5 4V5.5a1 1 0 0 1 1-1Z"/></svg>
         </button>
       </div>
@@ -96,6 +96,10 @@
           <button id="prereadingBtn" class="icon-label-btn" title="AI: concepts to understand before reading this paper" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2c-1.8-1-4-1.4-6.2-1V18c2.2-.4 4.4 0 6.2 1 1.8-1 4-1.4 6.2-1V5.2c-2.2-.4-4.4 0-6.2 1Z"/><path d="M12 6.2V19.2"/></svg>
             <span>Prereading</span>
+          </button>
+          <button id="bookmarkBtn" class="icon-btn-round" title="Bookmark this paper" disabled>
+            <svg class="icon-bm-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-4-6.5 4V5.5a1 1 0 0 1 1-1Z"/></svg>
+            <svg class="icon-bm-on" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-4-6.5 4V5.5a1 1 0 0 1 1-1Z"/></svg>
           </button>
           <button id="fullscreenBtn" class="icon-btn-round" title="Read full screen" disabled>
             <svg class="icon-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/></svg>
@@ -165,6 +169,41 @@
       </div>
     </main>
 
+
+    <!-- ================= Full-area screens (siblings of #viewer) =================
+         Only one of these or #viewer is ever displayed. Because the inactive
+         ones are display:none, CSS grid auto-placement ignores them entirely,
+         so the reader layout needs no explicit column assignments. -->
+    <section id="screenDashboard" class="screen hidden">
+      <header class="screen-head">
+        <div>
+          <h2 class="screen-title">Dashboard</h2>
+          <p class="screen-sub">An overview of your library.</p>
+        </div>
+      </header>
+      <div class="screen-body" id="dashboardBody"></div>
+    </section>
+
+    <section id="screenFolders" class="screen hidden">
+      <header class="screen-head">
+        <div>
+          <h2 class="screen-title">Papers</h2>
+          <p class="screen-sub" id="foldersCrumb"></p>
+        </div>
+      </header>
+      <div class="screen-body" id="foldersBody"></div>
+    </section>
+
+    <section id="screenBookmarks" class="screen hidden">
+      <header class="screen-head">
+        <div>
+          <h2 class="screen-title">Bookmarks</h2>
+          <p class="screen-sub">Papers you've marked to come back to.</p>
+        </div>
+      </header>
+      <div class="screen-body" id="bookmarksBody"></div>
+    </section>
+
     <!-- Right: chat + highlights -->
     <section id="panel">
       <div class="panel-tabs">
@@ -189,6 +228,6 @@
     </section>
   </div>
 
-  <script src="app.js?v=20"></script>
+  <script src="app.js?v=21"></script>
 </body>
 </html>

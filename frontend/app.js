@@ -28,6 +28,8 @@ const state = {
   folders: [],
   collapsed: new Set(),   // folder keys the user has collapsed (persisted)
   libraryTab: "all",      // "all" (folder tree) or "recent" (flat, most-recent-first)
+  view: "reader",         // "reader" | "dashboard" | "folders" | "bookmarks"
+  folderCursor: null,     // folder the Folders screen is currently showing (null = top)
   currentPaperId: null,
   currentTitle: "",
   pdfDoc: null,
@@ -78,6 +80,7 @@ async function init() {
   await loadFolders();
   await loadPapers();
   renderMessages([]);  // show the chat placeholder instead of a blank panel
+  setView("reader");
   wireEvents();
 }
 
@@ -89,6 +92,9 @@ async function loadFolders() {
 async function loadPapers() {
   state.papers = await api("/api/papers");
   renderPaperList();
+  syncBookmarkButton();
+  // Keep an open browse screen current after an upload, delete or rename.
+  if (typeof SCREENS !== "undefined" && SCREENS[state.view]) SCREENS[state.view].render();
 }
 
 // Papers are shown in a tree of folders (folders can nest arbitrarily), with an
@@ -402,6 +408,10 @@ function foldersByPath() {
 function openPaperMenu(anchor, p) {
   const items = [
     { label: "Rename", onClick: () => renamePaper(p) },
+    {
+      label: p.bookmarked ? "Remove bookmark" : "Bookmark",
+      onClick: () => setBookmark(p.id, !p.bookmarked),
+    },
     { sep: true, label: "Move to" },
     { label: "Uncategorized", checked: !p.folder_id, indent: true, onClick: () => movePaper(p, null) },
     ...foldersByPath().map((f) => ({
@@ -567,6 +577,7 @@ async function openPaper(id) {
   $("#summarizeBtn").disabled = !state.aiEnabled;
   $("#prereadingBtn").disabled = !state.aiEnabled;
   $("#deletePaperBtn").disabled = false;
+  syncBookmarkButton();
   $("#zoomIn").disabled = false;
   $("#zoomOut").disabled = false;
   $("#fullscreenBtn").disabled = false;
@@ -1626,6 +1637,262 @@ function requireAi() {
 }
 
 // ------------------------------------------------------------ wire events
+// =====================================================================
+// Screens (Dashboard / Folders / Bookmarks)
+//
+// The rail switches `document.body.dataset.view`. CSS hides #sidebar,
+// #viewer and #panel for the browse views and collapses #app to two
+// columns, so a screen takes the whole area beside the rail. Because the
+// inactive screens are display:none, grid auto-placement ignores them and
+// the reader layout is left untouched.
+// =====================================================================
+
+const SCREENS = {
+  dashboard: { el: "#screenDashboard", render: renderDashboard },
+  folders:   { el: "#screenFolders",   render: renderFoldersScreen },
+  bookmarks: { el: "#screenBookmarks", render: renderBookmarksScreen },
+};
+
+function setView(name) {
+  if (name !== "reader" && !SCREENS[name]) name = "reader";
+  state.view = name;
+  document.body.dataset.view = name;
+
+  for (const key of Object.keys(SCREENS)) {
+    $(SCREENS[key].el).classList.toggle("hidden", key !== name);
+  }
+  document.querySelectorAll("[data-view]").forEach((b) => {
+    b.classList.toggle("active", b.classList.contains("rail-btn") && b.dataset.view === name);
+  });
+
+  if (SCREENS[name]) SCREENS[name].render();
+}
+
+// Opening a paper from any screen drops you back into the reader.
+function openPaperFromScreen(id) {
+  setView("reader");
+  openPaper(id);
+}
+
+function paperCardIcon() {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 7 21h10a1.5 1.5 0 0 0 1.5-1.5V7.5L14 3Z"/><path d="M13.8 3.2v4.3h4.4M8.5 12.5h7M8.5 16h4.5"/></svg>';
+}
+
+function bookmarkGlyph(filled) {
+  return '<svg viewBox="0 0 24 24" fill="' + (filled ? "currentColor" : "none") +
+    '" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-4-6.5 4V5.5a1 1 0 0 1 1-1Z"/></svg>';
+}
+
+// One paper card, shared by the Folders and Bookmarks screens.
+function paperCard(p) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "browse-card";
+  card.innerHTML =
+    '<div class="card-top"><span class="card-icon">' + paperCardIcon() + '</span>' +
+    (p.bookmarked ? '<span class="card-bm" title="Bookmarked">' + bookmarkGlyph(true) + '</span>' : '') +
+    '</div><span class="card-name"></span>' +
+    '<span class="card-meta"><span class="card-pages"></span></span>';
+  card.querySelector(".card-name").textContent = p.title;
+  card.querySelector(".card-pages").textContent =
+    (p.num_pages || 0) + " pages · " + formatShortDate(p.uploaded_at);
+  card.onclick = () => openPaperFromScreen(p.id);
+  return card;
+}
+
+function folderCard(node) {
+  const count = subtreePaperCount(node, state.papers);
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "browse-card";
+  card.innerHTML =
+    '<div class="card-top"><span class="card-icon">' + ICONS.folder + '</span></div>' +
+    '<span class="card-name"></span>' +
+    '<span class="card-meta"><span class="card-count"></span></span>';
+  card.querySelector(".card-name").textContent = node.name;
+  card.querySelector(".card-count").textContent = count + (count === 1 ? " paper" : " papers");
+  card.onclick = () => { state.folderCursor = node.id; renderFoldersScreen(); };
+  return card;
+}
+
+function sectionLabel(text) {
+  const h = document.createElement("p");
+  h.className = "grid-label";
+  h.textContent = text;
+  return h;
+}
+
+function emptyNote(text) {
+  const d = document.createElement("div");
+  d.className = "screen-empty";
+  d.textContent = text;
+  return d;
+}
+
+// ------------------------------------------------------------- Folders
+// A directory browser: folders you drill into, papers you open.
+function renderFoldersScreen() {
+  const body = $("#foldersBody");
+  const crumbHost = $("#foldersCrumb");
+  body.innerHTML = "";
+  crumbHost.innerHTML = "";
+
+  const byId = new Map(state.folders.map((f) => [f.id, f]));
+  const cursor = state.folderCursor;
+
+  // If the folder we were in was deleted elsewhere, fall back to the top.
+  if (cursor != null && !byId.has(cursor)) state.folderCursor = null;
+
+  const trail = [];
+  let cur = state.folderCursor != null ? byId.get(state.folderCursor) : null;
+  let guard = 0;
+  while (cur && guard++ < 100) {
+    trail.unshift(cur);
+    cur = cur.parent_id != null ? byId.get(cur.parent_id) : null;
+  }
+
+  const crumbs = document.createElement("div");
+  crumbs.className = "crumbs";
+  const mkCrumb = (label, id, isCurrent) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "crumb" + (isCurrent ? " current" : "");
+    b.textContent = label;
+    if (!isCurrent) b.onclick = () => { state.folderCursor = id; renderFoldersScreen(); };
+    return b;
+  };
+  crumbs.appendChild(mkCrumb("All papers", null, trail.length === 0));
+  trail.forEach((f, i) => {
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep";
+    sep.textContent = "/";
+    crumbs.appendChild(sep);
+    crumbs.appendChild(mkCrumb(f.name, f.id, i === trail.length - 1));
+  });
+  crumbHost.appendChild(crumbs);
+
+  const { roots } = buildFolderTree();
+  let childFolders;
+  if (state.folderCursor == null) {
+    childFolders = roots;
+  } else {
+    const find = (nodes) => {
+      for (const n of nodes) {
+        if (n.id === state.folderCursor) return n;
+        const hit = find(n.children || []);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    childFolders = (find(roots) || { children: [] }).children;
+  }
+  const papersHere = state.papers.filter((p) =>
+    state.folderCursor == null ? !p.folder_id : p.folder_id === state.folderCursor
+  );
+
+  if (!childFolders.length && !papersHere.length) {
+    body.appendChild(emptyNote(
+      state.folderCursor == null
+        ? "No papers yet. Upload one from the reader to get started."
+        : "This folder is empty. Move papers into it from a paper's ⋯ menu."
+    ));
+    return;
+  }
+
+  if (childFolders.length) {
+    body.appendChild(sectionLabel(state.folderCursor == null ? "Folders" : "Subfolders"));
+    const grid = document.createElement("div");
+    grid.className = "card-grid";
+    childFolders.forEach((n) => grid.appendChild(folderCard(n)));
+    body.appendChild(grid);
+  }
+  if (papersHere.length) {
+    body.appendChild(sectionLabel(state.folderCursor == null ? "Uncategorized papers" : "Papers"));
+    const grid = document.createElement("div");
+    grid.className = "card-grid";
+    papersHere.forEach((p) => grid.appendChild(paperCard(p)));
+    body.appendChild(grid);
+  }
+}
+
+// ----------------------------------------------------------- Bookmarks
+function renderBookmarksScreen() {
+  const body = $("#bookmarksBody");
+  body.innerHTML = "";
+  const marked = state.papers.filter((p) => p.bookmarked);
+  if (!marked.length) {
+    body.appendChild(emptyNote(
+      "No bookmarks yet. Open a paper and press the bookmark button in the header, or use a paper's ⋯ menu."
+    ));
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "card-grid";
+  marked.forEach((p) => grid.appendChild(paperCard(p)));
+  body.appendChild(grid);
+}
+
+// ----------------------------------------------------------- Dashboard
+// Deliberately a placeholder - the real widgets aren't designed yet. It
+// shows counts already in memory so the screen isn't a blank box.
+function renderDashboard() {
+  const body = $("#dashboardBody");
+  body.innerHTML = "";
+
+  const stats = [
+    ["Papers", state.papers.length],
+    ["Folders", state.folders.length],
+    ["Bookmarked", state.papers.filter((p) => p.bookmarked).length],
+    ["Pages", state.papers.reduce((n, p) => n + (p.num_pages || 0), 0)],
+  ];
+  const row = document.createElement("div");
+  row.className = "stat-row";
+  for (const pair of stats) {
+    const cell = document.createElement("div");
+    cell.className = "stat";
+    cell.innerHTML = '<div class="stat-label"></div><div class="stat-value"></div>';
+    cell.querySelector(".stat-label").textContent = pair[0];
+    cell.querySelector(".stat-value").textContent = pair[1];
+    row.appendChild(cell);
+  }
+  body.appendChild(row);
+
+  const soon = document.createElement("div");
+  soon.className = "soon";
+  const head = document.createElement("strong");
+  head.textContent = "Dashboard coming soon";
+  soon.appendChild(head);
+  soon.appendChild(document.createTextNode(
+    "Reading activity, recently opened papers and highlight trends will live here."
+  ));
+  body.appendChild(soon);
+}
+
+// -------------------------------------------------------- bookmarking
+async function setBookmark(paperId, value) {
+  await api("/api/papers/" + paperId, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bookmarked: value }),
+  });
+  const p = state.papers.find((x) => x.id === paperId);
+  if (p) p.bookmarked = value ? 1 : 0;
+  syncBookmarkButton();
+  renderPaperList();
+  if (SCREENS[state.view]) SCREENS[state.view].render();
+}
+
+function syncBookmarkButton() {
+  const btn = $("#bookmarkBtn");
+  if (!btn) return;
+  const p = state.papers.find((x) => x.id === state.currentPaperId);
+  btn.disabled = !state.currentPaperId;
+  const on = !!(p && p.bookmarked);
+  btn.classList.toggle("is-on", on);
+  btn.title = on ? "Remove bookmark" : "Bookmark this paper";
+}
+
 function wireEvents() {
   $("#uploadInput").addEventListener("change", (e) => {
     if (e.target.files[0]) handleUpload(e.target.files[0]);
@@ -1651,8 +1918,15 @@ function wireEvents() {
       document.querySelectorAll(".rail-nav .rail-btn").forEach((b) => b.classList.toggle("active", b === btn));
     });
   });
-  $("#railReaderBtn")?.addEventListener("click", toggleFullscreen);
-  $("#railHighlightsBtn")?.addEventListener("click", () => setActiveTab("highlights"));
+  // Rail navigation: every element carrying data-view switches screens.
+  document.querySelectorAll("[data-view]").forEach((b) =>
+    b.addEventListener("click", () => setView(b.dataset.view))
+  );
+  $("#bookmarkBtn")?.addEventListener("click", () => {
+    if (!state.currentPaperId) return;
+    const p = state.papers.find((x) => x.id === state.currentPaperId);
+    setBookmark(state.currentPaperId, !(p && p.bookmarked));
+  });
   $("#railSettingsBtn")?.addEventListener("click", () => {
     const el = $("#aiStatus");
     el.scrollIntoView({ behavior: "smooth", block: "center" });

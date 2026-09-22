@@ -151,6 +151,7 @@ def write_paper(paper_id):
         "num_pages": paper["num_pages"],
         "uploaded_at": paper["uploaded_at"],
         "folder_uid": folder_uid,
+        "bookmarked": bool(paper.get("bookmarked")),
         "highlights": highlights,
         "chat": db.get_messages("doc", paper_id),
     }
