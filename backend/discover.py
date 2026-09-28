@@ -87,6 +87,10 @@ class DiscoverError(Exception):
         self.unreachable = unreachable
 
 
+class SearchCancelled(Exception):
+    """A newer live search replaced this one before it reached arXiv."""
+
+
 # ------------------------------------------------------------ arXiv HTTP
 
 # arXiv's CDN rejects TLS handshakes that don't offer ALPN (it answers 406 to
@@ -98,17 +102,22 @@ _arxiv_lock = threading.Lock()
 _arxiv_last = 0.0
 
 
-def _arxiv_get(url, timeout=40):
+def _arxiv_get(url, timeout=40, cancelled=None):
     """GET a URL on arxiv.org, serialized and spaced ARXIV_MIN_INTERVAL apart.
     Retries twice on throttling/transient HTTP errors; fails fast when arXiv
-    can't be reached at all (offline, DNS, timeout)."""
+    can't be reached at all (offline, DNS, timeout). If `cancelled()` turns
+    true while waiting for its turn, gives up with SearchCancelled."""
     global _arxiv_last
     last_err = None
     for attempt in range(3):
         with _arxiv_lock:
+            if cancelled and cancelled():
+                raise SearchCancelled()
             wait = ARXIV_MIN_INTERVAL - (time.time() - _arxiv_last)
             if wait > 0:
                 time.sleep(wait)
+            if cancelled and cancelled():
+                raise SearchCancelled()
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
                 with urllib.request.urlopen(req, timeout=timeout, context=_SSL) as resp:
@@ -194,8 +203,8 @@ def parse_atom(xml_bytes):
     return out
 
 
-def arxiv_query(search_query, sort="relevance", max_results=SEARCH_PER_QUERY):
-    """Run one arXiv API query (cached)."""
+def arxiv_query(search_query, sort="relevance", max_results=SEARCH_PER_QUERY, cancelled=None):
+    """Run one arXiv API query (cached). See _arxiv_get for `cancelled`."""
     params = {
         "search_query": search_query,
         "start": 0,
@@ -208,7 +217,7 @@ def arxiv_query(search_query, sort="relevance", max_results=SEARCH_PER_QUERY):
     cached = db.cache_get(key, ARXIV_CACHE_TTL)
     if cached is not None:
         return cached
-    entries = parse_atom(_arxiv_get(url))
+    entries = parse_atom(_arxiv_get(url, cancelled=cancelled))
     db.cache_put(key, entries)
     return entries
 
@@ -515,6 +524,45 @@ def search(query, limit=25):
     if not ai.has_api_key():
         notices.append("No Gemini key: plain keyword search with recency boost.")
     return _result(annotate(ranked), queries, mode, notices)
+
+
+# ------------------------------------------------------------ exact search
+# Live search-as-you-type for exact text. Only the newest call goes to arXiv:
+# older ones still waiting for the rate limit give up (see _arxiv_get).
+EXACT_POOL = 50
+_exact_lock = threading.Lock()
+_exact_latest = 0
+
+
+def _plain(s):
+    """Lowercase words only, so matching ignores case and punctuation."""
+    return " ".join(re.findall(r"[a-z0-9]+", (s or "").lower()))
+
+
+def exact_search(text, limit=25):
+    """arXiv papers whose title, abstract or authors contain `text` (ignoring
+    case and punctuation): title matches first, then arXiv's relevance order."""
+    global _exact_latest
+    text = _collapse(text)
+    needle = _plain(text)
+    if len(needle) < 2:
+        return _result([], [], "exact", [], text=text)
+    with _exact_lock:
+        _exact_latest += 1
+        me = _exact_latest
+    query = f'all:"{needle}"' if " " in needle else f"all:{needle}"
+    try:
+        pool = arxiv_query(query, max_results=EXACT_POOL, cancelled=lambda: _exact_latest != me)
+    except SearchCancelled:
+        return _result([], [query], "exact", [], text=text, stale=True)
+    # arXiv matches word stems loosely; keep only papers with the actual text.
+    hits = []
+    for e in pool:
+        in_title = needle in _plain(e["title"])
+        if in_title or needle in _plain(e["summary"] + " " + " ".join(e["authors"])):
+            hits.append((not in_title, e))
+    hits.sort(key=lambda h: h[0])  # stable: keeps arXiv's order within each group
+    return _result(annotate(_clean([e for _, e in hits][:limit])), [query], "exact", [], text=text)
 
 
 def _prefilter(pool, weighted_terms):

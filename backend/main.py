@@ -463,11 +463,15 @@ def library_chat(req: ChatRequest):
 # ------------------------------------------------------------ arXiv discovery
 
 @app.get("/api/arxiv/search")
-def arxiv_search(q: str = "", limit: int = 25):
+def arxiv_search(q: str = "", limit: int = 25, mode: str = "semantic"):
     """Semantic search across arXiv (Gemini queries + embeddings rerank, with
-    recency weighting); keyword fallback without a Gemini key."""
+    recency weighting; keyword fallback without a Gemini key), or with
+    mode=exact, a live exact-text search."""
+    limit = max(1, min(limit, 50))
     try:
-        return discover.search(q, limit=max(1, min(limit, 50)))
+        if mode == "exact":
+            return discover.exact_search(q, limit=limit)
+        return discover.search(q, limit=limit)
     except discover.DiscoverError as e:
         raise HTTPException(502 if q.strip() else 400, str(e))
 

@@ -317,14 +317,15 @@ function renderPaperItem(p) {
 
 // ------------------------------------------------------------ drag & drop
 // Papers and folders both carry a "paper:ID" / "folder:ID" payload; a folder
-// group is a drop target that moves the dragged item into it (node.id, or null
-// for Uncategorized / top level). stopPropagation keeps the innermost group the
+// group (or, on the Folders screen, a folder card or breadcrumb) is a drop
+// target that moves the dragged item into it (node.id, or null for
+// Uncategorized / top level). stopPropagation keeps the innermost group the
 // target when groups are nested.
 function dragHasItem(e) {
   return e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes("text/plain");
 }
 function clearAllDragOver() {
-  document.querySelectorAll(".folder-group.drag-over").forEach((el) => el.classList.remove("drag-over"));
+  document.querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
 }
 function addDropHandlers(wrap, targetId) {
   wrap.addEventListener("dragenter", (e) => {
@@ -452,7 +453,13 @@ function openFolderMenu(anchor, node) {
 }
 
 // ----------------------------------------------------- folder/paper actions
-async function newFolder() {
+// Re-render the sidebar tree and whichever browse screen is open.
+function refreshLibrary() {
+  renderPaperList();
+  if (SCREENS[state.view]) SCREENS[state.view].render();
+}
+
+async function newFolder(parentId = null) {
   const name = prompt("New folder name:");
   if (name === null) return;
   if (!name.trim()) return;
@@ -460,10 +467,10 @@ async function newFolder() {
     await api("/api/folders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim() }),
+      body: JSON.stringify({ name: name.trim(), parent_id: parentId }),
     });
     await loadFolders();
-    renderPaperList();
+    refreshLibrary();
   } catch (e) { alert("Couldn't create folder: " + e.message); }
 }
 
@@ -478,7 +485,7 @@ async function newSubfolder(parent) {
     });
     if (!state.collapsed.has(folderKey(parent.id))) { /* keep parent open */ }
     await loadFolders();
-    renderPaperList();
+    refreshLibrary();
   } catch (e) { alert("Couldn't create subfolder: " + e.message); }
 }
 
@@ -491,7 +498,7 @@ async function renameFolder(g) {
     body: JSON.stringify({ name: name.trim() }),
   });
   await loadFolders();
-  renderPaperList();
+  refreshLibrary();
 }
 
 async function moveFolder(folder, newParentId) {
@@ -508,7 +515,7 @@ async function moveFolder(folder, newParentId) {
       body: JSON.stringify({ parent_id: newParentId }),
     });
     await loadFolders();
-    renderPaperList();
+    refreshLibrary();
   } catch (e) { alert("Couldn't move folder: " + e.message); }
 }
 
@@ -547,10 +554,12 @@ async function movePaper(p, folderId) {
 async function moveToNewFolder(p) {
   const name = prompt("New folder name:");
   if (name === null || !name.trim()) return;
+  // On the Folders screen, create it inside the folder being viewed.
+  const parentId = state.view === "folders" ? state.folderCursor : null;
   const f = await api("/api/folders", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: name.trim() }),
+    body: JSON.stringify({ name: name.trim(), parent_id: parentId }),
   });
   await loadFolders();
   await movePaper(p, f.id);
@@ -792,6 +801,7 @@ function drawHighlightsForPage(n) {
     for (const r of hl.rects) {
       const div = document.createElement("div");
       div.className = "hl-rect";
+      div.dataset.id = hl.id;
       div.style.left = r.x * w + "px";
       div.style.top = r.y * h + "px";
       div.style.width = r.w * w + "px";
@@ -802,12 +812,78 @@ function drawHighlightsForPage(n) {
   }
 }
 
+// Highlights on page `n` that overlap any of `rects` (page-normalized 0..1).
+// The highlight layer is pointer-events:none so it never blocks text
+// selection — hit-testing is done here against the saved rects instead.
+function highlightsHit(n, rects) {
+  const eps = 0.001;
+  const overlaps = (a, b) =>
+    a.x < b.x + b.w - eps && b.x < a.x + a.w - eps &&
+    a.y < b.y + b.h - eps && b.y < a.y + a.h - eps;
+  return state.highlights.filter(
+    (hl) => hl.page === n && hl.rects.some((r) => rects.some((q) => overlaps(r, q)))
+  );
+}
+
+// Page number + normalized point under a mouse event, or null if not over a page.
+function pagePointOf(e) {
+  const n = findPageOf(e.target);
+  if (!n || !state.pageDivs[n]) return null;
+  const pr = state.pageDivs[n].container.getBoundingClientRect();
+  return {
+    n,
+    rect: { x: (e.clientX - pr.left) / pr.width, y: (e.clientY - pr.top) / pr.height, w: 0.002, h: 0.002 },
+  };
+}
+
+// Hover feedback: pointer cursor + stronger tint on the highlight under the mouse.
+let hoveredHlId = null;
+function onPdfHover(e) {
+  const pt = pagePointOf(e);
+  const hit = pt ? highlightsHit(pt.n, [pt.rect])[0] : null;
+  const id = hit ? hit.id : null;
+  if (id === hoveredHlId) return;
+  hoveredHlId = id;
+  $("#pdfContainer").classList.toggle("over-hl", !!id);
+  document.querySelectorAll(".hl-rect.hover").forEach((d) => d.classList.remove("hover"));
+  if (id) document.querySelectorAll(`.hl-rect[data-id="${id}"]`).forEach((d) => d.classList.add("hover"));
+}
+
+// Position the floating toolbar near `anchor` (a client rect), kept inside the
+// viewer. It lives inside #viewer (so it survives fullscreen), which is its
+// positioned ancestor and clips overflow. Flips below if there's no room above.
+function placeToolbar(anchor) {
+  const toolbar = $("#selectionToolbar");
+  const viewerRect = $("#viewer").getBoundingClientRect();
+  toolbar.classList.remove("hidden");
+  const tw = toolbar.offsetWidth, th = toolbar.offsetHeight, pad = 8;
+  let left = anchor.left - viewerRect.left;
+  let top = anchor.top - viewerRect.top - th - 8;
+  if (top < pad) top = anchor.bottom - viewerRect.top + 8;
+  left = Math.max(pad, Math.min(left, viewerRect.width - tw - pad));
+  top = Math.max(pad, Math.min(top, viewerRect.height - th - pad));
+  toolbar.style.left = left + "px";
+  toolbar.style.top = top + "px";
+}
+
 // --------------------------------------------------------- text selection
-function onSelection() {
+function onSelection(e) {
   const sel = window.getSelection();
   const toolbar = $("#selectionToolbar");
+  if (e && toolbar.contains(e.target)) return; // clicking a toolbar button
   if (!sel || sel.isCollapsed || !sel.toString().trim()) {
-    toolbar.classList.add("hidden");
+    // A plain click on a highlight offers to remove it.
+    const pt = e ? pagePointOf(e) : null;
+    const hits = pt ? highlightsHit(pt.n, [pt.rect]) : [];
+    state.pendingSelection = null;
+    state.pendingRemoval = hits.length ? { ids: hits.map((h) => h.id), page: pt.n } : null;
+    if (!hits.length) {
+      toolbar.classList.add("hidden");
+      return;
+    }
+    toolbar.classList.add("remove-only");
+    toolbar.querySelector('[data-action="unhighlight"]').classList.remove("hidden");
+    placeToolbar({ left: e.clientX, top: e.clientY, bottom: e.clientY });
     return;
   }
   // Make sure the selection is inside a PDF page.
@@ -834,21 +910,21 @@ function onSelection() {
 
   state.pendingSelection = { text: sel.toString().trim(), page: anchorPage, rects };
 
-  // Position the toolbar just above the selection. It lives inside #viewer
-  // (so it survives fullscreen), which is its positioned ancestor — so use
-  // coordinates relative to the viewer, and keep it inside the viewer's edges
-  // (the viewer clips overflow). Flip below the selection if there's no room.
-  const last = clientRects[clientRects.length - 1] || range.getBoundingClientRect();
-  const viewerRect = $("#viewer").getBoundingClientRect();
-  toolbar.classList.remove("hidden");
-  const tw = toolbar.offsetWidth, th = toolbar.offsetHeight, pad = 8;
-  let left = last.left - viewerRect.left;
-  let top = last.top - viewerRect.top - th - 8;
-  if (top < pad) top = last.bottom - viewerRect.top + 8;
-  left = Math.max(pad, Math.min(left, viewerRect.width - tw - pad));
-  top = Math.max(pad, Math.min(top, viewerRect.height - th - pad));
-  toolbar.style.left = left + "px";
-  toolbar.style.top = top + "px";
+  // If the selection covers existing highlights, offer to remove them too.
+  const hits = highlightsHit(anchorPage, rects);
+  state.pendingRemoval = hits.length ? { ids: hits.map((h) => h.id), page: anchorPage } : null;
+  toolbar.classList.remove("remove-only");
+  toolbar.querySelector('[data-action="unhighlight"]').classList.toggle("hidden", !hits.length);
+
+  // Position the toolbar just above the end of the selection.
+  placeToolbar(clientRects[clientRects.length - 1] || range.getBoundingClientRect());
+}
+
+async function removeHighlights() {
+  const r = state.pendingRemoval;
+  if (!r) return;
+  clearSelection();
+  for (const id of r.ids) await deleteHighlight(id, r.page);
 }
 
 function findPageOf(node) {
@@ -949,6 +1025,7 @@ function clearSelection() {
   window.getSelection().removeAllRanges();
   $("#selectionToolbar").classList.add("hidden");
   state.pendingSelection = null;
+  state.pendingRemoval = null;
 }
 
 // ---------------------------------------------------------------- chat
@@ -2014,35 +2091,62 @@ function bookmarkGlyph(filled) {
     '<path d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-4-6.5 4V5.5a1 1 0 0 1 1-1Z"/></svg>';
 }
 
+// A card that opens on click/Enter, drags as `payload` ("paper:ID" /
+// "folder:ID"), and has a ⋯ menu (also on right-click). A div rather than a
+// <button> because it contains the menu button.
+function browseCard(topHtml, payload, onOpen, openMenuAt) {
+  const card = document.createElement("div");
+  card.className = "browse-card";
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  card.innerHTML =
+    '<div class="card-top">' + topHtml +
+    '<button type="button" class="card-menu" title="Options">' + ICONS.kebab + '</button></div>' +
+    '<span class="card-name"></span><span class="card-meta"></span>';
+  card.onclick = onOpen;
+  card.addEventListener("keydown", (e) => {
+    if (e.target === card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen(); }
+  });
+  const menuBtn = card.querySelector(".card-menu");
+  menuBtn.onclick = (e) => { e.stopPropagation(); openMenuAt(menuBtn); };
+  card.addEventListener("contextmenu", (e) => { e.preventDefault(); openMenuAt(menuBtn); });
+  card.draggable = true;
+  card.addEventListener("dragstart", (e) => {
+    e.dataTransfer.setData("text/plain", payload);
+    e.dataTransfer.effectAllowed = "move";
+    card.classList.add("dragging");
+    closeMenu();
+  });
+  card.addEventListener("dragend", () => { card.classList.remove("dragging"); clearAllDragOver(); });
+  return card;
+}
+
 // One paper card, shared by the Folders and Bookmarks screens.
 function paperCard(p) {
-  const card = document.createElement("button");
-  card.type = "button";
-  card.className = "browse-card";
-  card.innerHTML =
-    '<div class="card-top"><span class="card-icon">' + paperCardIcon() + '</span>' +
-    (p.bookmarked ? '<span class="card-bm" title="Bookmarked">' + bookmarkGlyph(true) + '</span>' : '') +
-    '</div><span class="card-name"></span>' +
-    '<span class="card-meta"><span class="card-pages"></span></span>';
+  const card = browseCard(
+    '<span class="card-icon">' + paperCardIcon() + '</span><span class="card-spacer"></span>' +
+    (p.bookmarked ? '<span class="card-bm" title="Bookmarked">' + bookmarkGlyph(true) + '</span>' : ''),
+    "paper:" + p.id,
+    () => openPaperFromScreen(p.id),
+    (anchor) => openPaperMenu(anchor, p),
+  );
   card.querySelector(".card-name").textContent = p.title;
-  card.querySelector(".card-pages").textContent =
+  card.querySelector(".card-meta").textContent =
     (p.num_pages || 0) + " pages · " + formatShortDate(p.uploaded_at);
-  card.onclick = () => openPaperFromScreen(p.id);
   return card;
 }
 
 function folderCard(node) {
   const count = subtreePaperCount(node, state.papers);
-  const card = document.createElement("button");
-  card.type = "button";
-  card.className = "browse-card";
-  card.innerHTML =
-    '<div class="card-top"><span class="card-icon">' + ICONS.folder + '</span></div>' +
-    '<span class="card-name"></span>' +
-    '<span class="card-meta"><span class="card-count"></span></span>';
+  const card = browseCard(
+    '<span class="card-icon">' + ICONS.folder + '</span><span class="card-spacer"></span>',
+    "folder:" + node.id,
+    () => { state.folderCursor = node.id; renderFoldersScreen(); },
+    (anchor) => openFolderMenu(anchor, node),
+  );
   card.querySelector(".card-name").textContent = node.name;
-  card.querySelector(".card-count").textContent = count + (count === 1 ? " paper" : " papers");
-  card.onclick = () => { state.folderCursor = node.id; renderFoldersScreen(); };
+  card.querySelector(".card-meta").textContent = count + (count === 1 ? " paper" : " papers");
+  addDropHandlers(card, node.id);  // drop papers/folders onto it to move them in
   return card;
 }
 
@@ -2061,7 +2165,8 @@ function emptyNote(text) {
 }
 
 // ------------------------------------------------------------- Folders
-// A directory browser: folders you drill into, papers you open.
+// A directory browser: folders you drill into, papers you open. Items can be
+// dragged onto a folder card or breadcrumb, or moved from their ⋯ menu.
 function renderFoldersScreen() {
   const body = $("#foldersBody");
   const crumbHost = $("#foldersCrumb");
@@ -2090,6 +2195,7 @@ function renderFoldersScreen() {
     b.className = "crumb" + (isCurrent ? " current" : "");
     b.textContent = label;
     if (!isCurrent) b.onclick = () => { state.folderCursor = id; renderFoldersScreen(); };
+    addDropHandlers(b, id);  // drop onto a crumb to move an item up
     return b;
   };
   crumbs.appendChild(mkCrumb("All papers", null, trail.length === 0));
@@ -2125,7 +2231,7 @@ function renderFoldersScreen() {
     body.appendChild(emptyNote(
       state.folderCursor == null
         ? "No papers yet. Upload one from the reader to get started."
-        : "This folder is empty. Move papers into it from a paper's ⋯ menu."
+        : "This folder is empty. Drag papers onto it, or use a paper's ⋯ menu › Move to."
     ));
     return;
   }
@@ -2197,7 +2303,8 @@ function renderDashStats() {
 
 // -------------------------------------------------------- arXiv discovery
 const discover = {
-  search: { loading: false, error: null, data: null, query: "" },
+  // mode: "semantic" (Gemini, on submit) or "exact" (live as you type)
+  search: { loading: false, error: null, data: null, query: "", mode: "semantic", seq: 0 },
   recs:   { loading: false, error: null, data: null },
   adding: new Set(),     // arxiv ids currently being downloaded/ingested
   cardErrors: {},        // arxiv id -> last add error
@@ -2211,8 +2318,71 @@ const DISCOVER_HOSTS = {
   recs:   { status: "#recsStatus",        list: "#recsResults" },
 };
 
+const SEARCH_MODES = {
+  semantic: {
+    sub: "Describe what you're looking for in plain language. Recent papers rank higher.",
+    placeholder: "e.g. neural network decoders for surface-code quantum error correction",
+  },
+  exact: {
+    sub: "Papers whose title, abstract or authors contain exactly what you type. Updates as you type.",
+    placeholder: "e.g. surface code",
+  },
+};
+
+function setSearchMode(mode) {
+  if (!SEARCH_MODES[mode]) mode = "semantic";
+  const s = discover.search;
+  const changed = s.mode !== mode;
+  s.mode = mode;
+  try { localStorage.setItem("rpm.searchMode", mode); } catch (e) {}
+  document.querySelectorAll(".mode-tab").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  $("#arxivSearchSub").textContent = SEARCH_MODES[mode].sub;
+  $("#arxivSearchInput").placeholder = SEARCH_MODES[mode].placeholder;
+  $("#arxivSearchBtn").classList.toggle("hidden", mode === "exact");  // exact runs as you type
+  if (!changed) return;
+  clearTimeout(exactTimer);
+  s.seq++;  // drop any response still on its way
+  Object.assign(s, { loading: false, error: null, data: null });
+  $("#arxivSearchBtn").disabled = false;
+  renderArxivList("search");
+  if (mode === "exact") runExactSearch();
+}
+
+// ---- exact text: live, debounced; only the newest response is shown
+let exactTimer = null;
+function scheduleExactSearch() {
+  if (discover.search.mode !== "exact") return;
+  clearTimeout(exactTimer);
+  exactTimer = setTimeout(runExactSearch, 350);
+}
+
+async function runExactSearch() {
+  clearTimeout(exactTimer);
+  const s = discover.search;
+  const q = $("#arxivSearchInput").value.trim();
+  const seq = ++s.seq;
+  if (q.replace(/[^a-z0-9]/gi, "").length < 2) {
+    Object.assign(s, { loading: false, error: null, data: null, query: q });
+    renderArxivList("search");
+    return;
+  }
+  Object.assign(s, { loading: true, error: null, query: q });
+  renderArxivList("search");
+  try {
+    const data = await api("/api/arxiv/search?mode=exact&q=" + encodeURIComponent(q));
+    if (seq !== s.seq) return;  // the user typed more; a newer search owns the UI
+    if (!data.stale) s.data = data;
+  } catch (err) {
+    if (seq !== s.seq) return;
+    s.error = err.message || String(err);
+  }
+  s.loading = false;
+  renderArxivList("search");
+}
+
 async function runArxivSearch(e) {
   if (e) e.preventDefault();
+  if (discover.search.mode === "exact") return runExactSearch();
   const q = $("#arxivSearchInput").value.trim();
   if (!q || discover.search.loading) return;
   Object.assign(discover.search, { loading: true, error: null, query: q });
@@ -2324,6 +2494,9 @@ function libraryPaperFor(item) {
 
 function statusHtml(kind) {
   const s = discover[kind];
+  if (s.loading && kind === "search" && s.mode === "exact") {
+    return '<div class="disc-loading small"><span class="disc-spinner"></span><span>Searching arXiv…</span></div>';
+  }
   if (s.loading) {
     const msg = kind === "search"
       ? "Searching arXiv and ranking by meaning… (arXiv is rate-limited, so this can take 15–30 s)"
@@ -2362,6 +2535,9 @@ function renderArxivList(kind) {
       : "Based on your interests and the papers you've recently added and opened.";
   }
 
+  // Live exact search keeps the previous results up while the next one loads.
+  const live = kind === "search" && s.mode === "exact";
+  if (s.loading && live && s.data) return;
   listEl.innerHTML = "";
   if (!s.data || s.loading) return;
 
@@ -2373,6 +2549,12 @@ function renderArxivList(kind) {
     const badge = document.createElement("span");
     badge.className = "chip" + (mode === "semantic" ? " chip-lilac" : "");
     badge.textContent = mode === "semantic" ? "Ranked by meaning + recency" : "Keyword match + recency";
+    meta.appendChild(badge);
+  } else if (mode === "exact" && (s.data.items || []).length) {
+    const badge = document.createElement("span");
+    badge.className = "chip";
+    const n = s.data.items.length;
+    badge.textContent = `Exact match · ${n} paper${n === 1 ? "" : "s"}`;
     meta.appendChild(badge);
   }
   if (kind === "recs" && s.data.computed_at) {
@@ -2391,13 +2573,17 @@ function renderArxivList(kind) {
   const items = s.data.items || [];
   if (!items.length) {
     if (!(s.data.notices || []).length) {
-      listEl.appendChild(emptyNote(kind === "search" ? "No matching papers found on arXiv." : "No recommendations yet."));
+      listEl.appendChild(emptyNote(
+        kind !== "search" ? "No recommendations yet."
+          : mode === "exact" ? `No arXiv papers contain “${s.data.text}”.`
+          : "No matching papers found on arXiv."));
     }
     return;
   }
   const grid = document.createElement("div");
   grid.className = "arxiv-grid";
-  items.forEach((item) => grid.appendChild(arxivCard(item)));
+  const mark = mode === "exact" ? s.data.text : null;
+  items.forEach((item) => grid.appendChild(arxivCard(item, mark)));
   listEl.appendChild(grid);
 }
 
@@ -2419,7 +2605,24 @@ function relativeAge(d) {
   return Math.round(days / 365) + " yr ago";
 }
 
-function arxivCard(item) {
+// Fills `el` with `text`, wrapping matches of `term` in <mark>. Like the
+// server's exact search, case and punctuation between words are ignored.
+function setHighlighted(el, text, term) {
+  el.textContent = "";
+  const words = (term || "").match(/[a-z0-9]+/gi);
+  if (!words) { el.textContent = text; return; }
+  const pattern = words.join("[^a-z0-9]+");
+  let last = 0;
+  for (const m of text.matchAll(new RegExp(pattern, "gi"))) {
+    const mk = document.createElement("mark");
+    mk.textContent = m[0];
+    el.append(text.slice(last, m.index), mk);
+    last = m.index + m[0].length;
+  }
+  el.append(text.slice(last));
+}
+
+function arxivCard(item, mark = null) {
   const card = document.createElement("article");
   card.className = "arxiv-card";
   const pub = new Date(item.published);
@@ -2447,14 +2650,14 @@ function arxivCard(item) {
   idLink.textContent = "arXiv:" + item.arxiv_id;
   const title = card.querySelector(".ax-title");
   title.href = item.abs_url;
-  title.textContent = item.title;
+  setHighlighted(title, item.title, mark);
 
   const authors = item.authors || [];
-  card.querySelector(".ax-authors").textContent =
-    authors.slice(0, 4).join(", ") + (authors.length > 4 ? ` et al. (${authors.length})` : "");
+  setHighlighted(card.querySelector(".ax-authors"),
+    authors.slice(0, 4).join(", ") + (authors.length > 4 ? ` et al. (${authors.length})` : ""), mark);
 
   const abs = card.querySelector(".ax-abstract");
-  abs.textContent = item.summary;
+  setHighlighted(abs, item.summary, mark);
   abs.classList.toggle("expanded", discover.expanded.has(item.arxiv_id));
   abs.onclick = () => {
     if (discover.expanded.has(item.arxiv_id)) discover.expanded.delete(item.arxiv_id);
@@ -2558,10 +2761,17 @@ function wireEvents() {
   });
   $("#librarySearch").addEventListener("input", renderPaperList);
   $("#arxivSearchForm").addEventListener("submit", runArxivSearch);
+  $("#arxivSearchInput").addEventListener("input", scheduleExactSearch);
+  document.querySelectorAll(".mode-tab").forEach((b) =>
+    b.addEventListener("click", () => setSearchMode(b.dataset.mode)));
+  let savedMode = "semantic";
+  try { savedMode = localStorage.getItem("rpm.searchMode") || "semantic"; } catch (e) {}
+  setSearchMode(savedMode);
   $("#recsRefreshBtn").addEventListener("click", () => loadRecommendations(true));
   $("#interestForm").addEventListener("submit", addInterest);
   $("#libraryChatBtn").addEventListener("click", loadLibraryChat);
-  $("#newFolderBtn").addEventListener("click", newFolder);
+  $("#newFolderBtn").addEventListener("click", () => newFolder());
+  $("#foldersNewBtn").addEventListener("click", () => newFolder(state.folderCursor));
 
   // library card pill tabs: "All" (folder tree) vs "Recent" (flat, newest first)
   document.querySelectorAll(".lib-tab").forEach((btn) => {
@@ -2593,6 +2803,12 @@ function wireEvents() {
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.classList.add("pulse");
     setTimeout(() => el.classList.remove("pulse"), 900);
+  });
+  $("#themeToggleBtn")?.addEventListener("click", () => {
+    const root = document.documentElement;
+    const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("rpm.theme", next); } catch (e) {}
   });
   $("#summarizeBtn").addEventListener("click", summarizePaper);
   $("#prereadingBtn").addEventListener("click", generatePrereading);
@@ -2646,10 +2862,12 @@ function wireEvents() {
     t.addEventListener("click", () => setActiveTab(t.dataset.tab))
   );
 
-  document.addEventListener("mouseup", () => setTimeout(onSelection, 10));
+  document.addEventListener("mouseup", (e) => setTimeout(() => onSelection(e), 10));
+  $("#pdfContainer").addEventListener("mousemove", onPdfHover);
   $("#selectionToolbar").addEventListener("click", (e) => {
     const action = e.target.dataset.action;
-    if (action === "highlight") saveHighlight();
+    if (action === "unhighlight") removeHighlights();
+    else if (action === "highlight") saveHighlight();
     else if (action === "summarize") summarizeSelection();
     else if (action === "ask") askAboutSelection();
   });

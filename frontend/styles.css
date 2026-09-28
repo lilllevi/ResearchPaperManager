@@ -37,7 +37,53 @@
      these are functional "ink" colors for the reading surface, not UI chrome. */
   --highlight: #FFD54A;
   --selection: rgba(88, 66, 209, .32);
+
+  /* text on a --border-strong fill (primary buttons, active tabs, user bubbles) */
+  --on-strong: #FFFFFF;
+  --strong-hover: #000000;
+  --danger-line: #ECD2CB;
+  --scroll-thumb: #D9D7CF;
+  --scroll-thumb-hover: #C7C4B8;
+
+  color-scheme: light;
 }
+
+/* Dark theme: same structure, inverted neutrals. --border-strong flips to a
+   light fill, so everything drawn "black pill + white text" becomes
+   "light pill + dark text". Accents keep their hue; --accent-ink stays dark. */
+:root[data-theme="dark"] {
+  --bg: #0F1011;
+  --surface: #1A1B1D;
+  --surface-soft: #222325;
+  --surface-sunk: #151617;
+  --border: #2E2F32;
+  --border-strong: #ECEBE6;
+
+  --text: #ECEBE6;
+  --text-soft: #B2B1AD;
+  --muted: #7E7E7A;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, .40);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, .55);
+
+  --danger: #EF7A64;
+  --danger-soft: #3A1F1A;
+  --danger-line: #5A2E25;
+  --ok: #8DC26A;
+
+  --on-strong: #17181A;
+  --strong-hover: #FFFFFF;
+  --scroll-thumb: #3A3B3E;
+  --scroll-thumb-hover: #4A4B4F;
+
+  color-scheme: dark;
+}
+
+/* theme toggle in the icon rail: show the icon for the theme you'd switch to */
+#themeToggleBtn .icon-sun { display: none; }
+:root[data-theme="dark"] #themeToggleBtn .icon-sun { display: block; }
+:root[data-theme="dark"] #themeToggleBtn .icon-moon { display: none; }
 
 html, body {
   margin: 0;
@@ -108,7 +154,7 @@ svg { display: block; }
 }
 .rail-btn svg { width: 19px; height: 19px; }
 .rail-btn:hover { color: var(--text); background: var(--surface-soft); }
-.rail-btn.active { color: #fff; background: var(--border-strong); box-shadow: none; }
+.rail-btn.active { color: var(--on-strong); background: var(--border-strong); box-shadow: none; }
 
 /* ============================================================ sidebar */
 #sidebar { min-height: 0; overflow: hidden; display: flex; }
@@ -152,8 +198,8 @@ svg { display: block; }
 .icon-btn svg { width: 16px; height: 16px; }
 .icon-btn:hover { background: var(--surface-soft); border-color: var(--muted); }
 .icon-btn:active { transform: translateY(1px); }
-.upload-btn { background: var(--border-strong); color: #fff; border-color: var(--border-strong); }
-.upload-btn:hover { background: #000; }
+.upload-btn { background: var(--border-strong); color: var(--on-strong); border-color: var(--border-strong); }
+.upload-btn:hover { background: var(--strong-hover); }
 
 .search-wrap { position: relative; }
 .search-icon {
@@ -183,7 +229,7 @@ svg { display: block; }
   box-shadow: 0 0 0 3px var(--surface-sunk);
 }
 
-.lib-tabs {
+.lib-tabs, .mode-tabs {
   display: flex;
   gap: 2px;
   background: var(--surface-soft);
@@ -191,7 +237,7 @@ svg { display: block; }
   padding: 4px;
   align-self: flex-start;
 }
-.lib-tab {
+.lib-tab, .mode-tab {
   border: none;
   background: none;
   padding: 8px 18px;
@@ -202,8 +248,16 @@ svg { display: block; }
   cursor: pointer;
   transition: background .12s ease, color .12s ease;
 }
-.lib-tab:hover { color: var(--text); }
-.lib-tab.active { background: var(--border-strong); color: #fff; }
+.lib-tab:hover, .mode-tab:hover { color: var(--text); }
+.lib-tab.active, .mode-tab.active { background: var(--border-strong); color: var(--on-strong); }
+.mode-tabs { align-self: flex-end; flex-shrink: 0; }
+/* exact-text search matches */
+.arxiv-card mark {
+  background: color-mix(in srgb, #ffd84d 50%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
 
 .library-chat-btn {
   display: flex;
@@ -435,7 +489,7 @@ svg { display: block; }
   transition: background .1s ease;
 }
 .ctx-item:hover { background: var(--surface-soft); }
-.ctx-item.checked::before { content: "✓"; color: var(--accent-ink); font-weight: 700; margin-right: -2px; }
+.ctx-item.checked::before { content: "✓"; color: var(--text); font-weight: 700; margin-right: -2px; }
 .ctx-item:not(.checked).indent { padding-left: 22px; }
 .ctx-item.danger { color: var(--danger); }
 .ctx-item.danger:hover { background: var(--danger-soft); }
@@ -527,9 +581,9 @@ svg { display: block; }
 .viewer-actions button.primary {
   background: var(--border-strong);
   border-color: var(--border-strong);
-  color: #fff;
+  color: var(--on-strong);
 }
-.viewer-actions button.primary:hover:not(:disabled) { background: #000; }
+.viewer-actions button.primary:hover:not(:disabled) { background: var(--strong-hover); }
 /* Must come after .primary: equal specificity, so order decides. Without this
    a disabled Summarize stays a solid black pill that looks clickable. */
 .viewer-actions button.primary:disabled {
@@ -613,7 +667,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   border-radius: var(--radius);
   box-shadow: var(--shadow-md);
 }
-.viewer-note.error { border-color: #ecd2cb; color: var(--danger); }
+.viewer-note.error { border-color: var(--danger-line); color: var(--danger); }
 .viewer-note .spinner {
   width: 28px; height: 28px; margin: 0 auto 14px;
   border: 3px solid var(--border);
@@ -672,7 +726,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
 @keyframes pop { from { opacity: 0; transform: translateY(4px) scale(0.96); } to { opacity: 1; transform: none; } }
 .selection-toolbar button {
   background: transparent;
-  color: #fff;
+  color: var(--on-strong);
   border: none;
   padding: 8px 13px;
   border-radius: var(--pill);
@@ -681,7 +735,12 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   font-weight: 600;
   transition: background .12s ease;
 }
-.selection-toolbar button:hover { background: rgba(255, 255, 255, 0.16); }
+.selection-toolbar button:hover { background: color-mix(in srgb, var(--on-strong) 16%, transparent); }
+/* clicking an existing highlight shows only the remove action */
+.selection-toolbar.remove-only button:not(.unhighlight) { display: none; }
+/* hovering a saved highlight: pointer cursor + a stronger tint */
+#pdfContainer.over-hl .textLayer > span { cursor: pointer; }
+.hl-rect.hover { opacity: 0.7; }
 .hidden { display: none !important; }
 
 /* ============================ shared markdown (rendered AI answers) =====
@@ -744,7 +803,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   z-index: 2147483000;
   display: flex; align-items: center; gap: 8px;
   background: var(--border-strong);
-  color: #fff;
+  color: var(--on-strong);
   border: none;
   border-radius: 999px;
   padding: 13px 19px;
@@ -755,7 +814,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   transition: background .15s ease, transform .1s ease;
 }
 .fs-chat-toggle svg { width: 17px; height: 17px; }
-.fs-chat-toggle:hover { background: #000; }
+.fs-chat-toggle:hover { background: var(--strong-hover); }
 .fs-chat-toggle:active { transform: translateY(1px); }
 
 /* The bubble popup chat used in fullscreen. Draggable by its header and
@@ -862,7 +921,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   padding: 9px 13px;
   border-radius: 14px 14px 4px 14px;
   background: var(--border-strong);
-  color: #fff;
+  color: var(--on-strong);
   align-self: flex-end;
   max-width: 90%;
   white-space: pre-wrap;
@@ -934,7 +993,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   width: 40px; height: 40px;
   display: flex; align-items: center; justify-content: center;
   background: var(--border-strong);
-  color: #fff;
+  color: var(--on-strong);
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -942,7 +1001,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   transition: background .15s ease, transform .1s ease;
 }
 #fsChatSend svg { width: 16px; height: 16px; }
-#fsChatSend:hover { background: #000; }
+#fsChatSend:hover { background: var(--strong-hover); }
 #fsChatSend:active { transform: translateY(1px); }
 
 /* ============================================================ panel */
@@ -978,7 +1037,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   transition: color .12s ease, background .12s ease;
 }
 .tab:hover { color: var(--text); }
-.tab.active { color: #fff; background: var(--border-strong); }
+.tab.active { color: var(--on-strong); background: var(--border-strong); }
 .tab-content { display: none; flex: 1; flex-direction: column; overflow: hidden; }
 .tab-content.active { display: flex; }
 
@@ -1011,7 +1070,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .msg.user {
   background: var(--border-strong);
-  color: #fff;
+  color: var(--on-strong);
   align-self: flex-end;
   max-width: 88%;
   border-bottom-right-radius: 4px;
@@ -1131,7 +1190,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
 .msg-quote {
   margin-bottom: 6px;
   padding-left: 8px;
-  border-left: 2px solid rgba(255, 255, 255, .45);
+  border-left: 2px solid color-mix(in srgb, currentColor 45%, transparent);
   font-size: 12.5px;
   opacity: .8;
   white-space: normal;
@@ -1194,7 +1253,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   border: 0;
   border-radius: var(--pill);
   background: var(--border-strong);
-  color: #fff;
+  color: var(--on-strong);
   padding: 5px 12px;
   font: inherit;
   font-size: 12px;
@@ -1231,7 +1290,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   width: 42px; height: 42px;
   display: flex; align-items: center; justify-content: center;
   background: var(--border-strong);
-  color: #fff;
+  color: var(--on-strong);
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -1239,7 +1298,7 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
   transition: background .15s ease, transform .1s ease;
 }
 #sendBtn svg { width: 17px; height: 17px; }
-#sendBtn:hover { background: #000; }
+#sendBtn:hover { background: var(--strong-hover); }
 #sendBtn:active { transform: translateY(1px); }
 
 #highlightList { flex: 1; overflow-y: auto; padding: 8px 18px 18px; display: flex; flex-direction: column; gap: 10px; }
@@ -1266,8 +1325,8 @@ button.danger, .icon-btn-round.danger { color: var(--danger); }
 /* scrollbars */
 #paperList::-webkit-scrollbar, #pdfContainer::-webkit-scrollbar,
 #chatMessages::-webkit-scrollbar, #highlightList::-webkit-scrollbar { width: 9px; }
-::-webkit-scrollbar-thumb { background: #D9D7CF; border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
-::-webkit-scrollbar-thumb:hover { background: #C7C4B8; background-clip: padding-box; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* ============================================================ full screens
@@ -1383,7 +1442,6 @@ body[data-view="bookmarks"] #panel {
 .browse-card .card-top {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
   gap: 8px;
 }
 .browse-card .card-icon {
@@ -1415,6 +1473,33 @@ body[data-view="bookmarks"] #panel {
   gap: 8px;
 }
 .browse-card .card-bm { color: var(--text); flex-shrink: 0; }
+.browse-card .card-spacer { flex: 1; }
+.browse-card:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 1px; }
+.browse-card.dragging { opacity: 0.4; }
+/* folder card or breadcrumb highlighted as a drop target */
+.browse-card.drag-over {
+  background: var(--surface-sunk);
+  border-color: var(--border-strong);
+  border-style: dashed;
+}
+.crumb.drag-over { color: var(--text); text-decoration: underline; }
+.browse-card .card-menu {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px;
+  margin: -4px -6px 0 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity .12s ease, background .12s ease;
+}
+.browse-card .card-menu svg { width: 14px; height: 14px; }
+.browse-card:hover .card-menu, .browse-card:focus-within .card-menu { opacity: 1; }
+.browse-card .card-menu:hover { background: var(--surface-sunk); color: var(--text); }
+@media (hover: none) { .browse-card .card-menu { opacity: 1; } }
 .browse-card .card-bm svg { width: 14px; height: 14px; }
 
 /* dashboard stat tiles */
@@ -1518,8 +1603,8 @@ body[data-view="bookmarks"] #panel {
   white-space: nowrap;
   transition: background .12s ease, border-color .12s ease, color .12s ease, transform .1s ease;
 }
-.btn-dark { background: var(--border-strong); border: 1px solid var(--border-strong); color: #fff; }
-.btn-dark:hover:not(:disabled) { background: #000; }
+.btn-dark { background: var(--border-strong); border: 1px solid var(--border-strong); color: var(--on-strong); }
+.btn-dark:hover:not(:disabled) { background: var(--strong-hover); }
 .btn-ghost { background: var(--surface); border: 1px solid var(--border); color: var(--text-soft); }
 .btn-ghost:hover:not(:disabled) { background: var(--surface-soft); border-color: var(--muted); color: var(--text); }
 .btn-dark:active:not(:disabled), .btn-ghost:active:not(:disabled) { transform: translateY(1px); }
