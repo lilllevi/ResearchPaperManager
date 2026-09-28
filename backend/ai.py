@@ -478,40 +478,76 @@ def normalize_dialogue(raw):
     return "\n".join(f"{name}: {text}" for name, text in turns)
 
 
+# How each character should be performed. Shared by the app and by
+# tools/voice_audition.py, so auditions sound like what the app produces.
+PETER_DIRECTION = (
+    "Peter: a big, dopey middle-aged dad from Providence, Rhode Island. His "
+    "voice is VERY nasal: he talks through his nose, pinched and honking, as "
+    "if he has a permanently stuffed-up nose; keep that nasal twang on every "
+    "word. Very thick Rhode Island / New England accent (drops his r's: 'cah', "
+    "'wicked smaht'), a little slurred, loud and enthusiastic, talks in fast "
+    "rambling bursts, and breaks into a wheezy, high-pitched, nasal 'heh heh "
+    "heh' giggle at his own jokes."
+)
+STEWIE_DIRECTION = (
+    "Stewie: a precocious evil-genius toddler with a crisp, posh, upper-class "
+    "British accent (received pronunciation). Theatrical and condescending, "
+    "with clipped, precise diction, drawn-out vowels for emphasis, a slightly "
+    "high and nasal pitch, and dry, withering comic timing."
+)
+
+
 def speak_dialogue(script):
     """Perform a Peter/Stewie script with Gemini multi-speaker TTS.
     Returns WAV bytes (16-bit mono PCM, usually 24 kHz)."""
     prompt = (
         "Perform this comedy scene as a lively two-person audio sketch.\n"
-        "Peter: a big, loud, goofy middle-aged dad from Rhode Island with a "
-        "thick New England accent; boisterous, dim but enthusiastic, with "
-        "wheezy chuckles and fast, rambling delivery.\n"
-        "Stewie: a precocious baby with a crisp, posh, upper-class British "
-        "accent; theatrical, withering and precise, with dry comic timing.\n\n"
-        + script
+        f"{PETER_DIRECTION}\n{STEWIE_DIRECTION}\n\n{script}"
     )
+    speech_config = {
+        "multiSpeakerVoiceConfig": {
+            "speakerVoiceConfigs": [
+                {"speaker": "Peter",
+                 "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": PETER_VOICE}}},
+                {"speaker": "Stewie",
+                 "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": STEWIE_VOICE}}},
+            ]
+        }
+    }
+    return _tts(prompt, speech_config)
+
+
+def speak_as(direction, voice, line):
+    """One character's line in one built-in voice (used for auditions)."""
+    prompt = f"Read this line in character.\n{direction}\n\n{line}"
+    speech_config = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}
+    return _tts(prompt, speech_config)
+
+
+def speak_lines(direction, voice, lines):
+    """All of one character's lines in one request, with a long silence after
+    each so the caller can split the audio back into lines (see voice.py)."""
+    prompt = (
+        f"Read the following {len(lines)} lines in character, in order. After "
+        "each line, stay completely silent for two full seconds before the next "
+        "one. Do not read these instructions, numbers or anything else aloud.\n"
+        f"{direction}\n\n" + "\n\n".join(lines)
+    )
+    speech_config = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}
+    return _tts(prompt, speech_config)
+
+
+def _tts(prompt, speech_config):
+    """Gemini TTS request → WAV bytes. Retries an overloaded TTS_MODEL
+    briefly (like _complete_resilient), then tries TTS_FALLBACK_MODEL once."""
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "multiSpeakerVoiceConfig": {
-                    "speakerVoiceConfigs": [
-                        {"speaker": "Peter",
-                         "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": PETER_VOICE}}},
-                        {"speaker": "Stewie",
-                         "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": STEWIE_VOICE}}},
-                    ]
-                }
-            },
-        },
+        "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": speech_config},
     }
 
     def call(model):
         return _post(f"{API_BASE}/models/{model}:generateContent", body, timeout=TTS_TIMEOUT_S)
 
-    # Same idea as _complete_resilient: retry an overloaded model briefly,
-    # then try the older TTS model once.
     data, delay, start = None, RETRY_FIRST_DELAY_S, time.monotonic()
     while data is None:
         try:

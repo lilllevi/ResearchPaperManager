@@ -223,6 +223,33 @@ Settings live in `.env`:
   `gemini-2.5-flash-preview-tts`); `RPM_PETER_VOICE` / `RPM_STEWIE_VOICE` pick
   the built-in voices (defaults `Fenrir` / `Iapetus`).
 
+### Custom voices for Peter and Stewie (optional, RVC)
+
+Peter and Stewie can each speak in a voice model of your own, such as an RVC `.pth` trained
+on **your own recordings** (use only voices you have permission to use).
+
+1. Double-click **setup-rvc.bat** once. It builds `.rvc-env\` (about 5 GB,
+   git-ignored): Python 3.12, Applio's RVC inference code, CUDA PyTorch, and
+   the pitch/content models. It needs Anaconda or Miniconda and git. An NVIDIA
+   GPU makes it much faster.
+2. Add to `.env`:
+   - `RPM_PETER_RVC_MODEL=C:\path\to\voice.pth` (turns the feature on)
+   - `RPM_PETER_RVC_INDEX=C:\path\to\voice.index` (optional, improves timbre)
+   - `RPM_PETER_RVC_PITCH=0`: semitones; raise or lower it until it sounds
+     like your pitch range.
+   - For Stewie, the same three with `RPM_STEWIE_RVC_…`. Either character
+     can use a model on their own.
+   - Advanced: `RPM_RVC_INDEX_RATE` (0.75), `RPM_RVC_PROTECT` (0.33),
+     `RPM_RVC_F0_METHOD` (`rmvpe`)
+3. Restart the app and press **New take** on a paper.
+
+With a model set, Gemini records Peter's and Stewie's lines separately (2 TTS
+requests per clip). The app splits them at the pauses, converts each modeled
+character's lines with RVC, and interleaves the turns. RVC changes only the voice's timbre; the
+timing and delivery still come from Gemini's read. You can test a model on
+its own, without the app, with `.rvc-env\env\python.exe tools\rvc_worker.py`.
+See the docstring for the job format.
+
 Ranking knobs (recency half-life, profile size, pool sizes, cache lifetimes)
 are constants at the top of `backend/discover.py`. Gemini's free tier embeds
 at most 100 texts per minute, so each search embeds at most `EMBED_NEW_MAX`

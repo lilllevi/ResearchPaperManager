@@ -23,3 +23,6 @@ server.err.log
 
 # Scratch notes written by subagents; local to this machine.
 .claude/agent-memory/
+
+# Local RVC (voice conversion) environment for "Peter explains" — large, per machine.
+.rvc-env/

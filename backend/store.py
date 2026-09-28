@@ -196,10 +196,15 @@ def peter_paths(uid):
     return AUDIO_DIR / f"{uid}-peter.wav", AUDIO_DIR / f"{uid}-peter.json"
 
 
-def write_peter(uid, wav, script, created_at):
-    wav_path, meta_path = peter_paths(uid)
+def write_peter(uid, wav, meta):
+    """Save a clip and its metadata ({transcript, created_at, lines})."""
+    wav_path, _ = peter_paths(uid)
     _write_atomic(wav_path, wav)
-    _write_atomic(meta_path, _dump({"transcript": script, "created_at": created_at}))
+    write_peter_meta(uid, meta)
+
+
+def write_peter_meta(uid, meta):
+    _write_atomic(peter_paths(uid)[1], _dump(meta))
 
 
 def read_peter(uid):

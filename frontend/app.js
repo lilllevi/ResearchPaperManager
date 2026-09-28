@@ -609,6 +609,7 @@ async function openPaper(id) {
   $("#chatTitle").textContent = state.currentTitle;
   leaveFsThread();
   hidePeter();
+  if (peterJobs.has(id)) peterExplains(false);  // its clip is still being made: show progress
   loadDocChat();
 
   state.highlights = await api(`/api/papers/${id}/highlights`);
@@ -1411,7 +1412,18 @@ function generatePrereading() {
 // Plays a parody audio clip: Peter Griffin explains the paper to Stewie (a
 // Gemini-written dialogue performed by Gemini TTS). One clip is cached per
 // paper on the server, so replays are instant; "New take" regenerates.
-let peterRequest = 0;  // ignore responses that arrive after the user moved on
+//
+// Making a clip takes a minute or more, so it runs in the background: open
+// another paper or screen and it keeps going. When it finishes you get the
+// player back if you're still on that paper, or a "ready" notice if not.
+let peterRequest = 0;  // which request the player is currently showing
+const peterJobs = new Map();  // paperId -> pending api() promise
+
+// True when the player is showing (or waiting for) this paper's clip.
+function peterShowing(paperId, req) {
+  return req === peterRequest && state.currentPaperId === paperId &&
+    !$("#peterPlayer").classList.contains("hidden");
+}
 
 async function peterExplains(regenerate) {
   const paperId = state.currentPaperId;
@@ -1419,34 +1431,205 @@ async function peterExplains(regenerate) {
   const req = ++peterRequest;
   const audio = $("#peterAudio");
   audio.pause();
+  stopPeterVideo();
   $("#peterPlayer").classList.remove("hidden");
   audio.classList.add("hidden");
   $("#peterActions").classList.add("hidden");
   $("#peterTranscript").classList.add("hidden");
   $("#peterTranscriptBtn").textContent = "Transcript";
   $("#peterRegenBtn").disabled = true;
-  setPeterStatus(regenerate
-    ? "Peter's taking another crack at it… (about 30–90 s)"
-    : "Peter's reading the paper… (the first time takes about 30–90 s)", true);
-  try {
-    const res = await api(
+
+  let job = peterJobs.get(paperId);
+  if (!job) {
+    job = api(
       `/api/papers/${paperId}/peter` + (regenerate ? "?regenerate=true" : ""),
       { method: "POST" }
     );
-    if (req !== peterRequest || state.currentPaperId !== paperId) return;
+    peterJobs.set(paperId, job);
+    job.finally(() => peterJobs.delete(paperId)).catch(() => {});
+    // Finished while the user was elsewhere: tell them.
+    job.then(
+      (res) => { if (!res.cached && !peterWatching(paperId)) showPeterNotice(paperId, true); },
+      (e) => { if (!peterWatching(paperId)) showPeterNotice(paperId, false, e.message); },
+    );
+    setPeterStatus(regenerate
+      ? "Peter's taking another crack at it… (about 30–90 s). You can keep reading or open another paper; it'll keep going."
+      : "Peter's reading the paper… (the first time takes about 30–90 s). You can keep reading or open another paper; it'll keep going.", true);
+  } else {
+    setPeterStatus("Still working on it… (you can leave; it'll keep going)", true);
+  }
+
+  try {
+    const res = await job;
+    if (!peterShowing(paperId, req)) return;
     renderPeterTranscript(res.transcript);
     setPeterStatus("");
     audio.src = res.audio_url;
     audio.classList.remove("hidden");
     $("#peterActions").classList.remove("hidden");
-    audio.play().catch(() => {});  // autoplay may be blocked; controls are there
+    setPeterSubtitles(res.lines);
+    startPeterVideo();
+    // Don't start talking over a screen the user can't see.
+    if (state.view === "reader") audio.play().catch(() => {});  // autoplay may be blocked
   } catch (e) {
-    if (req !== peterRequest) return;
+    if (!peterShowing(paperId, req)) return;
     setPeterStatus("Couldn't make the clip: " + e.message);
     $("#peterActions").classList.remove("hidden");
   } finally {
     if (req === peterRequest) $("#peterRegenBtn").disabled = false;
   }
+}
+
+// The user is looking at this paper's player in the reader right now.
+function peterWatching(paperId) {
+  return state.view === "reader" && state.currentPaperId === paperId &&
+    !$("#peterPlayer").classList.contains("hidden");
+}
+
+let peterNoticeTimer = null;
+function showPeterNotice(paperId, ok, error) {
+  const p = state.papers.find((x) => x.id === paperId);
+  const title = p ? `“${truncate(p.title, 60)}”` : "your paper";
+  $("#peterNoticeText").textContent = ok
+    ? `Peter's explanation of ${title} is ready.`
+    : `Couldn't make Peter's clip for ${title}: ${error}`;
+  $("#peterNoticeOpen").textContent = ok ? "Listen" : "Open paper";
+  $("#peterNoticeOpen").onclick = () => {
+    hidePeterNotice();
+    if (!state.papers.some((x) => x.id === paperId)) return;  // deleted meanwhile
+    setView("reader");
+    if (state.currentPaperId !== paperId) openPaper(paperId);
+    if (ok) peterExplains(false);  // cached now, so it's instant
+  };
+  $("#peterNotice").classList.remove("hidden");
+  clearTimeout(peterNoticeTimer);
+  peterNoticeTimer = setTimeout(hidePeterNotice, 20000);
+}
+
+function hidePeterNotice() {
+  clearTimeout(peterNoticeTimer);
+  $("#peterNotice").classList.add("hidden");
+}
+
+// ------------------------------------------------ Peter's background video
+// While the clip plays, a muted video from the videos/ folder plays alongside
+// it: a random file from a random point, following the audio's play/pause.
+// When one video ends, another random one takes over.
+let peterVideos = null;  // file names, fetched once per page load
+
+async function startPeterVideo() {
+  const video = $("#peterVideo");
+  const req = peterRequest;
+  try {
+    if (!peterVideos) peterVideos = (await api("/api/videos")).videos || [];
+  } catch (e) { peterVideos = []; }
+  if (req !== peterRequest || !peterVideos.length) return;  // player closed meanwhile
+  const name = peterVideos[Math.floor(Math.random() * peterVideos.length)];
+  video.onloadedmetadata = () => {
+    // Somewhere that leaves at least 20 s to play (or the start of a short one).
+    const room = (video.duration || 0) - 20;
+    if (room > 0 && isFinite(room)) video.currentTime = Math.random() * room;
+    if (!$("#peterAudio").paused) video.play().catch(() => {});
+  };
+  video.onended = () => startPeterVideo();
+  video.onerror = () => {  // unplayable file (e.g. an unsupported codec): try another
+    peterVideos = peterVideos.filter((v) => v !== name);
+    startPeterVideo();
+  };
+  video.src = "/api/videos/" + encodeURIComponent(name);
+  video.classList.remove("hidden");
+  showPeterStage();
+}
+
+function showPeterStage() {
+  $("#peterStage").classList.remove("hidden");
+  $("#peterPlayer").classList.add("has-stage");
+}
+
+function stopPeterVideo() {
+  const video = $("#peterVideo");
+  video.onloadedmetadata = video.onended = video.onerror = null;
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  video.classList.add("hidden");
+  clearPeterSubs();
+  $("#peterStage").classList.add("hidden");
+  $("#peterPlayer").classList.remove("has-stage");
+}
+
+function setPeterExpanded(on) {
+  $("#peterPlayer").classList.toggle("expanded", on);
+  $("#peterExpand").title = on ? "Shrink" : "Expand";
+}
+
+// ------------------------------------------------- Peter's subtitles
+// Big captions over the video, a few words at a time, with the word being
+// spoken enlarged. Word timings come from the server (estimated from the
+// audio's pauses; see voice.py) and follow the audio's clock.
+const peterSubs = { chunks: [], shown: -1, raf: 0 };
+
+function setPeterSubtitles(lines) {
+  const chunks = [];
+  for (const line of lines || []) {
+    let cur = null;
+    for (const w of line.words || []) {
+      if (!cur) chunks.push(cur = { who: line.who, words: [] });
+      cur.words.push(w);
+      const n = cur.words.length;
+      if (n >= 5 || /[.!?…]$/.test(w.w) || (n >= 3 && /[,;:—]$/.test(w.w))) cur = null;
+    }
+  }
+  for (const c of chunks) c.start = c.words[0].s;
+  chunks.forEach((c, i) => {
+    const next = chunks[i + 1];
+    c.until = Math.min(next ? next.start : Infinity, c.words[c.words.length - 1].e + 0.6);
+  });
+  clearPeterSubs();
+  peterSubs.chunks = chunks;
+  if (chunks.length) showPeterStage();
+  renderPeterSubs();
+}
+
+function clearPeterSubs() {
+  cancelAnimationFrame(peterSubs.raf);
+  peterSubs.chunks = [];
+  peterSubs.shown = -1;
+  $("#peterSubs").innerHTML = "";
+}
+
+function renderPeterSubs() {
+  const t = $("#peterAudio").currentTime;
+  const chunks = peterSubs.chunks;
+  const i = chunks.findIndex((c) => t >= c.start && t < c.until);
+  const box = $("#peterSubs");
+  if (i !== peterSubs.shown) {  // a new chunk: rebuild the caption
+    peterSubs.shown = i;
+    box.innerHTML = "";
+    if (i >= 0) {
+      const who = document.createElement("span");
+      who.className = "who " + chunks[i].who.toLowerCase();
+      who.textContent = chunks[i].who;
+      const line = document.createElement("span");
+      line.className = "line";
+      for (const w of chunks[i].words) {
+        const el = document.createElement("span");
+        el.className = "w";
+        el.textContent = w.w;
+        line.appendChild(el);
+      }
+      box.append(who, line);
+    }
+  }
+  if (i < 0) return;
+  let active = -1;
+  chunks[i].words.forEach((w, k) => { if (t >= w.s) active = k; });
+  box.querySelectorAll(".w").forEach((el, k) => el.classList.toggle("on", k === active));
+}
+
+function peterSubsLoop() {
+  renderPeterSubs();
+  peterSubs.raf = requestAnimationFrame(peterSubsLoop);
 }
 
 function setPeterStatus(text, loading = false) {
@@ -1477,11 +1660,13 @@ function renderPeterTranscript(script) {
   }
 }
 
+// Closes the player. A clip still being made keeps going (see peterJobs).
 function hidePeter() {
   peterRequest++;
   const audio = $("#peterAudio");
   audio.pause();
   audio.removeAttribute("src");
+  stopPeterVideo();
   $("#peterPlayer").classList.add("hidden");
 }
 
@@ -2895,6 +3080,27 @@ function wireEvents() {
   $("#peterBtn").addEventListener("click", () => peterExplains(false));
   $("#peterRegenBtn").addEventListener("click", () => peterExplains(true));
   $("#peterClose").addEventListener("click", hidePeter);
+  $("#peterNoticeClose").addEventListener("click", hidePeterNotice);
+  // The background video and subtitles follow the clip's play/pause.
+  $("#peterAudio").addEventListener("play", () => {
+    const v = $("#peterVideo");
+    if (v.getAttribute("src")) v.play().catch(() => {});
+    cancelAnimationFrame(peterSubs.raf);
+    peterSubsLoop();
+  });
+  $("#peterAudio").addEventListener("pause", () => {
+    $("#peterVideo").pause();
+    cancelAnimationFrame(peterSubs.raf);
+    renderPeterSubs();
+  });
+  $("#peterAudio").addEventListener("seeked", renderPeterSubs);
+  $("#peterExpand").addEventListener("click", () =>
+    setPeterExpanded(!$("#peterPlayer").classList.contains("expanded")));
+  $("#peterStage").addEventListener("dblclick", () =>
+    setPeterExpanded(!$("#peterPlayer").classList.contains("expanded")));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("#peterPlayer").classList.contains("expanded")) setPeterExpanded(false);
+  });
   $("#peterTranscriptBtn").addEventListener("click", () => {
     const t = $("#peterTranscript");
     t.classList.toggle("hidden");

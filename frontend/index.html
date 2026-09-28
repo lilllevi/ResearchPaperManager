@@ -196,9 +196,19 @@
       <div id="peterPlayer" class="peter-player hidden">
         <div class="peter-head">
           <span class="peter-title">Peter explains</span>
+          <div class="peter-head-btns">
+          <button type="button" id="peterExpand" title="Expand">
+            <svg class="icon-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5"/></svg>
+            <svg class="icon-collapse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M20 4l-6 6M4 20l6-6"/></svg>
+          </button>
           <button type="button" id="peterClose" title="Close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
           </button>
+          </div>
+        </div>
+        <div id="peterStage" class="peter-stage hidden" title="Double-click to expand or shrink">
+          <video id="peterVideo" class="hidden" muted playsinline preload="auto"></video>
+          <div id="peterSubs" class="peter-subs" aria-hidden="true"></div>
         </div>
         <div id="peterStatus" class="peter-status"></div>
         <audio id="peterAudio" controls preload="auto" class="hidden"></audio>
@@ -343,6 +353,14 @@
     </section>
   </div>
 
+
+  <div id="peterNotice" class="peter-notice hidden" role="status">
+    <span id="peterNoticeText" class="peter-notice-text"></span>
+    <button type="button" id="peterNoticeOpen" class="btn-dark">Listen</button>
+    <button type="button" id="peterNoticeClose" class="peter-notice-x" title="Dismiss">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
 
   <script src="app.js?v=34"></script>
 </body>

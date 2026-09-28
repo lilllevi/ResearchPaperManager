@@ -5,7 +5,10 @@ Run from the project root with run.ps1, or directly:
 """
 
 import json
+import os
 import sys
+import threading
+from concurrent.futures import Future
 from pathlib import Path
 
 # Make the sibling modules (db, rag, ai, pdf_utils) importable whether the app
@@ -31,6 +34,7 @@ import ai
 import pdf_utils
 import store
 import discover
+import voice
 
 FRONTEND_DIR = BASE_DIR / "frontend"
 
@@ -326,6 +330,7 @@ def summarize_selection(paper_id: int, req: ChatRequest):
 def _peter_response(paper_id, meta, cached):
     return {
         "transcript": meta["transcript"],
+        "lines": meta.get("lines") or [],  # subtitle timings
         "created_at": meta["created_at"],
         "audio_url": f"/api/papers/{paper_id}/peter/audio?v={int(meta['created_at'])}",
         "cached": cached,
@@ -339,34 +344,87 @@ def _paper_or_404(paper_id):
     return paper
 
 
+SUBTITLES_VERSION = 2  # bump to recompute saved clips' subtitle timings
+
+
+def _with_subtitles(uid, meta):
+    """Clips made before subtitles existed (or with an older way of timing
+    them) get their timings worked out once."""
+    if meta.get("subtitles_version", 1 if "lines" in meta else 0) < SUBTITLES_VERSION:
+        meta["subtitles_version"] = SUBTITLES_VERSION
+        try:
+            meta["lines"] = voice.subtitles(store.peter_paths(uid)[0].read_bytes(), meta["transcript"])
+        except (OSError, voice.VoiceError):
+            meta["lines"] = []
+        store.write_peter_meta(uid, meta)
+    return meta
+
+
 @app.get("/api/papers/{paper_id}/peter")
 def peter_status(paper_id: int):
-    meta = store.read_peter(_paper_or_404(paper_id)["uid"])
+    uid = _paper_or_404(paper_id)["uid"]
+    meta = store.read_peter(uid)
     if not meta:
         raise HTTPException(404, "No clip yet.")
-    return _peter_response(paper_id, meta, True)
+    return _peter_response(paper_id, _with_subtitles(uid, meta), True)
+
+
+# Clips being made, by paper uid. Making one takes a minute or more; a second
+# request for the same paper (the user came back to it, or reloaded the page)
+# waits for the running job instead of starting another.
+_peter_jobs = {}
+_peter_jobs_lock = threading.Lock()
+
+
+def _make_peter(paper, text):
+    script = ai.peter_explains_script(paper["title"], text)
+    # With a custom voice configured (RVC), voice.perform records the
+    # characters separately and converts them; otherwise one TTS request.
+    if voice.enabled():
+        wav, lines = voice.perform(script)
+    else:
+        wav = ai.speak_dialogue(script)
+        lines = voice.subtitles(wav, script)
+    meta = {"transcript": script, "created_at": db.now(), "lines": lines,
+            "subtitles_version": SUBTITLES_VERSION}
+    store.write_peter(paper["uid"], wav, meta)
+    return meta
 
 
 @app.post("/api/papers/{paper_id}/peter")
 def peter_explains(paper_id: int, regenerate: bool = False):
     _require_ai()
     paper = _paper_or_404(paper_id)
+    uid = paper["uid"]
     if not regenerate:
-        meta = store.read_peter(paper["uid"])
+        meta = store.read_peter(uid)
         if meta:
-            return _peter_response(paper_id, meta, True)
+            return _peter_response(paper_id, _with_subtitles(uid, meta), True)
     # Papers rebuilt from sidecars can have an empty full_text in the cache;
     # the page-text sidecar always has it.
-    text = paper.get("full_text") or "\n".join(store.read_pages(paper["uid"]))
+    text = paper.get("full_text") or "\n".join(store.read_pages(uid))
     if not text.strip():
         raise HTTPException(400, "This paper has no extracted text to explain.")
+
+    with _peter_jobs_lock:
+        job = _peter_jobs.get(uid)
+        owner = job is None
+        if owner:
+            job = _peter_jobs[uid] = Future()
+    if owner:
+        # Runs to completion even if the browser stops waiting, so the clip is
+        # cached for when the user comes back.
+        try:
+            job.set_result(_make_peter(paper, text))
+        except BaseException as e:
+            job.set_exception(e)
+        finally:
+            with _peter_jobs_lock:
+                _peter_jobs.pop(uid, None)
     try:
-        script = ai.peter_explains_script(paper["title"], text)
-        wav = ai.speak_dialogue(script)
-    except ai.GeminiError as e:
+        meta = job.result()
+    except (ai.GeminiError, voice.VoiceError) as e:
         raise HTTPException(502, str(e))
-    meta = {"transcript": script, "created_at": db.now()}
-    store.write_peter(paper["uid"], wav, script, meta["created_at"])
     return _peter_response(paper_id, meta, False)
 
 
@@ -376,6 +434,38 @@ def peter_audio(paper_id: int):
     if not wav_path.exists():
         raise HTTPException(404, "No clip yet.")
     return FileResponse(wav_path, media_type="audio/wav")
+
+
+# ------------------------------------------------------------------ videos
+# Background videos for the "Peter explains" player: any browser-playable
+# video in RPM_VIDEOS_DIR (default: videos/ in the project folder).
+VIDEO_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
+               ".ogv": "video/ogg", ".mov": "video/quicktime"}
+
+
+def _videos_dir():
+    return Path(os.environ.get("RPM_VIDEOS_DIR", "").strip().strip('"') or BASE_DIR / "videos")
+
+
+def _video_files():
+    d = _videos_dir()
+    if not d.is_dir():
+        return {}
+    return {f.name: f for f in sorted(d.iterdir())
+            if f.is_file() and f.suffix.lower() in VIDEO_TYPES}
+
+
+@app.get("/api/videos")
+def list_videos():
+    return {"videos": list(_video_files())}
+
+
+@app.get("/api/videos/{name}")
+def get_video(name: str):
+    f = _video_files().get(name)  # only names from the listing: no path tricks
+    if not f:
+        raise HTTPException(404, "Video not found.")
+    return FileResponse(f, media_type=VIDEO_TYPES[f.suffix.lower()])
 
 
 # ------------------------------------------------------------ chat threads
