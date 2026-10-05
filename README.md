@@ -156,12 +156,14 @@ must never be synced by anything.
 
 Any file-sync service works — OneDrive, Dropbox, Syncthing, iCloud. Point it at
 `storage/` and the app needs no configuration. On Windows, move the folder into
-OneDrive and leave a directory junction behind:
+OneDrive and leave a directory junction behind. `$env:OneDriveConsumer` is your
+personal OneDrive; use it rather than `$env:OneDrive`, which points to a school
+or work account when one is signed in (those can be deleted when you leave):
 
 ```powershell
 # from the project root, with the app closed
-Move-Item storage "$env:OneDrive\ResearchPaperManager-storage"
-New-Item -ItemType Junction -Path storage -Target "$env:OneDrive\ResearchPaperManager-storage"
+Move-Item storage "$env:OneDriveConsumer\ResearchPaperManager-storage"
+New-Item -ItemType Junction -Path storage -Target "$env:OneDriveConsumer\ResearchPaperManager-storage"
 ```
 
 ### Setting up the second computer
@@ -175,7 +177,7 @@ Copy-Item .env.example .env
 notepad .env          # paste your GEMINI_API_KEY
 
 # 2. Point storage/ at the OneDrive copy (which has already synced here).
-New-Item -ItemType Junction -Path storage -Target "$env:OneDrive\ResearchPaperManager-storage"
+New-Item -ItemType Junction -Path storage -Target "$env:OneDriveConsumer\ResearchPaperManager-storage"
 
 # 3. Run it. The first launch rebuilds cache/papers.db from storage/.
 .\run.ps1
@@ -232,8 +234,12 @@ on **your own recordings** (use only voices you have permission to use).
    git-ignored): Python 3.12, Applio's RVC inference code, CUDA PyTorch, and
    the pitch/content models. It needs Anaconda or Miniconda and git. An NVIDIA
    GPU makes it much faster.
-2. Add to `.env`:
-   - `RPM_PETER_RVC_MODEL=C:\path\to\voice.pth` (turns the feature on)
+2. That's it for the voices in this repo: Peter's and Stewie's models are in
+   `voices/PG` and `voices/SG` (stored with Git LFS, so run `git lfs install`
+   before cloning), each with a `voice.json` holding its pitch. Once
+   `.rvc-env\` exists they're used automatically. To use a different model,
+   override them in `.env`:
+   - `RPM_PETER_RVC_MODEL=C:\path\to\voice.pth`
    - `RPM_PETER_RVC_INDEX=C:\path\to\voice.index` (optional, improves timbre)
    - `RPM_PETER_RVC_PITCH=0`: semitones; raise or lower it until it sounds
      like your pitch range.
@@ -249,6 +255,11 @@ character's lines with RVC, and interleaves the turns. RVC changes only the voic
 timing and delivery still come from Gemini's read. You can test a model on
 its own, without the app, with `.rvc-env\env\python.exe tools\rvc_worker.py`.
 See the docstring for the job format.
+
+While a clip plays, a muted background video from `videos/` plays alongside
+it, starting at a random point (`videos/mc_parkour.mp4`, a 30-minute cut, is
+included via Git LFS). Add any `.mp4`/`.webm` there, or point `RPM_VIDEOS_DIR`
+in `.env` at another folder.
 
 Ranking knobs (recency half-life, profile size, pool sizes, cache lifetimes)
 are constants at the top of `backend/discover.py`. Gemini's free tier embeds

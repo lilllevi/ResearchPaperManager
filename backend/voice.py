@@ -1,7 +1,7 @@
 """Optional custom voices for Peter and Stewie in "Peter explains", via RVC.
 
-When RPM_PETER_RVC_MODEL and/or RPM_STEWIE_RVC_MODEL point at an RVC voice
-model (.pth) — e.g. one trained on your own recordings — that character's
+When a character has an RVC voice model (.pth), from voices/PG or voices/SG or
+from RPM_PETER_RVC_MODEL / RPM_STEWIE_RVC_MODEL in .env, that character's
 lines are converted to that voice:
 
   1. Gemini TTS reads all of Peter's lines in one request and all of Stewie's
@@ -53,9 +53,35 @@ def _setting(name, default=""):
 
 SPEAKERS = ("Peter", "Stewie")
 
+# Voice models that ship with the project (Git LFS): voices/<folder>/ holds a
+# .pth, an optional .index and an optional voice.json ({"pitch": semitones}).
+# .env settings override them.
+VOICES_DIR = BASE_DIR / "voices"
+VOICE_FOLDERS = {"Peter": "PG", "Stewie": "SG"}
+
+
+def _bundled(speaker, pattern):
+    """The bundled file matching `pattern` for a speaker, or "". Only offered
+    once the RVC environment is installed, so a machine without it keeps the
+    plain TTS voices instead of failing every clip."""
+    if not RVC_PYTHON.is_file():
+        return ""
+    found = sorted((VOICES_DIR / VOICE_FOLDERS[speaker]).glob(pattern))
+    # An un-fetched Git LFS file is a tiny text pointer, not a model.
+    found = [f for f in found if f.stat().st_size > 1024]
+    return str(found[0]) if found else ""
+
+
+def _bundled_pitch(speaker):
+    try:
+        cfg = json.loads((VOICES_DIR / VOICE_FOLDERS[speaker] / "voice.json").read_text("utf-8"))
+        return str(int(cfg.get("pitch", 0)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return "0"
+
 
 def model_path(speaker):
-    return _setting(f"RPM_{speaker.upper()}_RVC_MODEL")
+    return _setting(f"RPM_{speaker.upper()}_RVC_MODEL") or _bundled(speaker, "*.pth")
 
 
 def enabled():
@@ -72,13 +98,13 @@ def _voice_config(speaker):
     model = Path(model_path(speaker))
     if not model.is_file():
         raise VoiceError(f"{speaker}'s voice model wasn't found: {model} ({prefix}_MODEL in .env).")
-    index = _setting(f"{prefix}_INDEX")
+    index = _setting(f"{prefix}_INDEX") or _bundled(speaker, "*.index")
     if index and not Path(index).is_file():
         raise VoiceError(f"{speaker}'s voice index wasn't found: {index} ({prefix}_INDEX in .env).")
     if not RVC_PYTHON.is_file() or not APPLIO_DIR.is_dir():
         raise VoiceError("The RVC environment isn't set up. Run setup-rvc.bat in the project folder.")
     return {"model": str(model), "index": index,
-            "pitch": int(_setting(f"{prefix}_PITCH", "0") or 0)}
+            "pitch": int(_setting(f"{prefix}_PITCH", _bundled_pitch(speaker)) or 0)}
 
 
 # ------------------------------------------------------------ WAV helpers
